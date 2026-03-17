@@ -10,6 +10,8 @@ import {
   getAllClients,
   getClientById,
   getExecutionLog,
+  getLatestMlPredictions,
+  getLatestRuleBasedSignals,
   getLatestSignals,
   getOpenPositionCount,
   getOpenPositions,
@@ -54,7 +56,17 @@ export const appRouter = router({
     }),
   }),
 
-  // ─── Signals (read from tradinghq DB) ──────────────────────────────────────
+  // ─── ML Predictions (read from tradinghq DB) ──────────────────────────────
+  mlPredictions: router({
+    getLatest: protectedProcedure.query(async () => {
+      return getLatestMlPredictions();
+    }),
+    getRuleBasedSignals: protectedProcedure.query(async () => {
+      return getLatestRuleBasedSignals();
+    }),
+  }),
+
+  // ─── Signals (trade recommendations from tradinghq DB) ────────────────────
   signals: router({
     getFeed: protectedProcedure
       .input(z.object({ limit: z.number().min(1).max(50).default(20) }).optional())

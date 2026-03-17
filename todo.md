@@ -48,3 +48,14 @@
 - [x] Save checkpoint
 - [x] Create GitHub repo and push
 - [x] Guide Hostinger Node.js deployment
+
+## ML Predictions UI (March 17, 2026)
+- [x] Add getLatestMlPredictions() DB helper reading from tradinghq.ml_predictions
+- [x] Add getLatestRuleBasedSignals() DB helper reading from tradinghq.factor_snapshots
+- [x] Add mlPredictions.getLatest tRPC endpoint
+- [x] Add mlPredictions.getRuleBasedSignals tRPC endpoint
+- [x] Build MLPredictions page — 4 XGBoost model cards with SHAP features + probability bars
+- [x] Build Dashboard overview page — ML summary, open positions, recent log
+- [x] Add Dashboard and ML Predictions to sidebar navigation
+- [x] Redirect post-login to /dashboard instead of /signals
+- [x] All 11 tests passing

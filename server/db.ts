@@ -262,6 +262,97 @@ export async function getExecutionLog(limit = 100, clientId?: number): Promise<E
 
 // ─── TradinghqDB helpers (read-only signal feed) ──────────────────────────────
 
+export interface MlPrediction {
+  id: number;
+  date: string;
+  modelName: string;
+  prediction: string;
+  confidence: number;
+  probStrongBuy: number | null;
+  probBuy: number | null;
+  probHold: number | null;
+  probSell: number | null;
+  probStrongSell: number | null;
+  topFeatures: unknown;
+  modelVersion: string;
+  createdAt: Date;
+}
+
+export interface RuleBasedSignal {
+  id: number;
+  predictionType: string;
+  pair: string;
+  overallSignal: string;
+  overallScore: number;
+  confidence: number;
+  activeFeatureCount: number;
+  factors: unknown;
+  createdAt: Date;
+}
+
+export async function getLatestMlPredictions(): Promise<MlPrediction[]> {
+  const db = await getTradinghqDb();
+  if (!db) return [];
+  try {
+    const result = await db.execute(
+      `SELECT p.id, p.date, p.model_name as modelName, p.prediction, p.confidence,
+       p.prob_strong_buy as probStrongBuy, p.prob_buy as probBuy, p.prob_hold as probHold,
+       p.prob_sell as probSell, p.prob_strong_sell as probStrongSell,
+       p.top_features as topFeatures, p.model_version as modelVersion, p.created_at as createdAt
+       FROM ml_predictions p
+       INNER JOIN (
+         SELECT model_name, MAX(created_at) as max_created
+         FROM ml_predictions
+         GROUP BY model_name
+       ) latest ON p.model_name = latest.model_name AND p.created_at = latest.max_created
+       ORDER BY FIELD(p.model_name, 'btc_direction_7d', 'btc_direction_30d', 'rotation_signal', 'dca_intensity')`
+    );
+    const rows = (result as unknown[])[0] as MlPrediction[];
+    return rows.map(r => ({
+      ...r,
+      confidence: typeof r.confidence === 'string' ? parseFloat(r.confidence as unknown as string) : r.confidence,
+      topFeatures: typeof r.topFeatures === 'string' ? JSON.parse(r.topFeatures as unknown as string) : r.topFeatures,
+    }));
+  } catch (e) {
+    console.warn('[TradinghqDB] getLatestMlPredictions error:', e);
+    return [];
+  }
+}
+
+export async function getLatestRuleBasedSignals(): Promise<RuleBasedSignal[]> {
+  const db = await getTradinghqDb();
+  if (!db) return [];
+  try {
+    const result = await db.execute(
+      `SELECT f.id, f.prediction_type as predictionType, f.pair,
+       f.overall_signal as overallSignal, f.overall_score as overallScore,
+       f.confidence, f.active_features_count as activeFeatureCount,
+       f.factors, f.createdAt
+       FROM factor_snapshots f
+       INNER JOIN (
+         SELECT prediction_type, pair, MAX(createdAt) as max_created
+         FROM factor_snapshots
+         WHERE prediction_type IN ('RULE_DCA', 'RULE_ROTATION')
+         GROUP BY prediction_type, pair
+       ) latest ON f.prediction_type = latest.prediction_type
+         AND f.pair = latest.pair
+         AND f.createdAt = latest.max_created
+       ORDER BY f.prediction_type, f.pair`
+    );
+    const rows = (result as unknown[])[0] as RuleBasedSignal[];
+    return rows.map(r => ({
+      ...r,
+      overallScore: typeof r.overallScore === 'string' ? parseFloat(r.overallScore as unknown as string) : r.overallScore,
+      confidence: typeof r.confidence === 'string' ? parseFloat(r.confidence as unknown as string) : r.confidence,
+      factors: typeof r.factors === 'string' ? JSON.parse(r.factors as unknown as string) : r.factors,
+    }));
+  } catch (e) {
+    console.warn('[TradinghqDB] getLatestRuleBasedSignals error:', e);
+    return [];
+  }
+}
+
+
 export interface TradinghqSignal {
   recommendationId: string;
   type: string;

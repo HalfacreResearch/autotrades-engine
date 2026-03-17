@@ -10,11 +10,23 @@ import ClientRoster from "./pages/ClientRoster";
 import ActivePositions from "./pages/ActivePositions";
 import TradeLog from "./pages/TradeLog";
 import Home from "./pages/Home";
+import Dashboard from "./pages/Dashboard";
+import MLPredictions from "./pages/MLPredictions";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+      <Route path="/dashboard">
+        <DashboardLayout>
+          <Dashboard />
+        </DashboardLayout>
+      </Route>
+      <Route path="/ml">
+        <DashboardLayout>
+          <MLPredictions />
+        </DashboardLayout>
+      </Route>
       <Route path="/signals">
         <DashboardLayout>
           <SignalFeed />

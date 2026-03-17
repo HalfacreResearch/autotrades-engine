@@ -11,7 +11,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!loading && isAuthenticated) {
-      navigate("/signals");
+      navigate("/dashboard");
     }
   }, [isAuthenticated, loading, navigate]);
 
