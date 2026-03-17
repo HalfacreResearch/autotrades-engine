@@ -3,114 +3,210 @@ import { trpc } from "@/lib/trpc";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "sonner";
-import { RefreshCw, TrendingUp, TrendingDown, AlertTriangle, Activity } from "lucide-react";
+import { RefreshCw, TrendingUp, TrendingDown, AlertTriangle, Activity, Shield, Zap } from "lucide-react";
 
 function pnlColor(pnl: number) {
-  if (pnl > 0) return "text-emerald-400";
-  if (pnl < 0) return "text-red-400";
-  return "text-zinc-400";
+  if (pnl > 0) return "text-emerald-500";
+  if (pnl < 0) return "text-red-500";
+  return "text-muted-foreground";
+}
+
+type ExitType = "full" | "capital" | "emergency";
+
+interface Position {
+  id: number;
+  clientId: number;
+  pair: string;
+  entryPrice: string;
+  currentPrice?: string | null;
+  sizePercent: string;
+  unrealizedPnlPercent?: string | null;
+  peakPnlPercent?: string | null;
+  trailingStopPercent?: string | null;
+  trailingStopTriggered?: boolean | null;
+  openedAt: string | Date;
 }
 
 interface ExitDialogProps {
-  position: {
-    id: number;
-    clientId: number;
-    pair: string;
-    entryPrice: string;
-    unrealizedPnlPercent: string | null;
-  };
+  position: Position;
   onClose: () => void;
   onSuccess: () => void;
 }
 
 function ExitDialog({ position, onClose, onSuccess }: ExitDialogProps) {
-  const [isTestAccount, setIsTestAccount] = useState(true);
-  const exitMutation = trpc.trades.executeRotationExit.useMutation();
-  const { data: clients } = trpc.clients.getAll.useQuery();
-  const client = clients?.find(c => c.id === position.clientId);
-  const pnl = parseFloat(position.unrealizedPnlPercent ?? "0");
+  const [exitType, setExitType] = useState<ExitType>("full");
+  const [capitalBtcCost, setCapitalBtcCost] = useState("");
+  const [capitalCurrentPrice, setCapitalCurrentPrice] = useState("");
+
+  const manualExit = trpc.trading.executeManualExit.useMutation();
+  const capitalExit = trpc.trading.executeCapitalExit.useMutation();
+  const emergencyExit = trpc.trading.executeEmergencyExit.useMutation();
+
+  const isLoading = manualExit.isPending || capitalExit.isPending || emergencyExit.isPending;
+  const pnl = parseFloat(String(position.unrealizedPnlPercent ?? "0"));
+  const entryPrice = parseFloat(String(position.entryPrice));
 
   async function handleExit() {
     try {
-      const result = await exitMutation.mutateAsync({
-        clientId: position.clientId,
-        positionId: position.id,
-        pair: position.pair,
-        entryPrice: parseFloat(position.entryPrice),
-        isTestAccount,
-        sellPercent: 100,
-      });
-      if (result.success) {
-        toast.success(`Position closed — P&L: ${result.realizedPnlPercent?.toFixed(2)}%`);
-        onSuccess();
-        onClose();
-      } else {
-        toast.error(result.error ?? "Exit failed");
+      if (exitType === "full") {
+        const r = await manualExit.mutateAsync({ pair: position.pair });
+        const ok = r.clientResults.filter((c) => c.success).length;
+        toast.success(`Full exit executed — ${ok} client${ok !== 1 ? "s" : ""} closed`);
+      } else if (exitType === "capital") {
+        const r = await capitalExit.mutateAsync({
+          pair: position.pair,
+          entryBtcCost: parseFloat(capitalBtcCost),
+          currentPrice: parseFloat(capitalCurrentPrice),
+        });
+        const ok = r.clientResults.filter((c) => c.success).length;
+        toast.success(`Capital exit executed — ${ok} client${ok !== 1 ? "s" : ""} processed`);
+      } else if (exitType === "emergency") {
+        const r = await emergencyExit.mutateAsync({ pair: position.pair });
+        const ok = r.clientResults.filter((c) => c.success).length;
+        toast.success(`Emergency exit fired — ${ok} client${ok !== 1 ? "s" : ""} processed`);
       }
-    } catch (err: unknown) {
+      onSuccess();
+      onClose();
+    } catch (err) {
       toast.error(err instanceof Error ? err.message : "Exit failed");
     }
   }
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="bg-zinc-900 border-zinc-700 text-zinc-100 max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Close Position — {position.pair}</DialogTitle>
+          <DialogDescription>
+            Fires across all active clients simultaneously.
+          </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 py-2">
-          <div className="bg-zinc-800 rounded-lg p-3 text-sm space-y-1">
+
+        <div className="space-y-4">
+          {/* Position summary */}
+          <div className="rounded-lg border p-3 text-sm space-y-1.5">
             <div className="flex justify-between">
-              <span className="text-zinc-400">Client</span>
-              <span>{client?.clientName ?? `Client #${position.clientId}`}</span>
+              <span className="text-muted-foreground">Entry Price</span>
+              <span>{entryPrice.toFixed(8)} BTC</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-zinc-400">Pair</span>
-              <span>{position.pair}</span>
+              <span className="text-muted-foreground">Position Size</span>
+              <span>{position.sizePercent}% of BTC balance</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-zinc-400">Entry Price</span>
-              <span>{parseFloat(position.entryPrice).toFixed(8)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-400">Unrealized P&L</span>
+              <span className="text-muted-foreground">Unrealized P&L</span>
               <span className={pnlColor(pnl)}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}%</span>
             </div>
           </div>
 
-          <div className="flex items-center justify-between bg-zinc-800 rounded-lg p-3">
-            <div>
-              <Label className="text-zinc-300">Account Mode</Label>
-              <p className="text-xs text-zinc-500 mt-0.5">
-                {isTestAccount ? "Test account — no real funds" : "LIVE account — real funds at risk"}
-              </p>
+          {/* Exit type selector */}
+          <div className="space-y-2">
+            <Label>Exit Type</Label>
+            <div className="flex gap-2">
+              {(["full", "capital", "emergency"] as const).map((t) => (
+                <Button
+                  key={t}
+                  size="sm"
+                  variant={exitType === t ? (t === "emergency" ? "destructive" : "default") : "outline"}
+                  className="flex-1 capitalize text-xs"
+                  onClick={() => setExitType(t)}
+                >
+                  {t === "full" ? "Full" : t === "capital" ? "Capital" : "⚠ Emergency"}
+                </Button>
+              ))}
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-zinc-400">Test</span>
-              <Switch checked={!isTestAccount} onCheckedChange={(v) => setIsTestAccount(!v)} className="data-[state=checked]:bg-orange-500" />
-              <span className={`text-xs font-medium ${!isTestAccount ? "text-orange-400" : "text-zinc-400"}`}>Live</span>
-            </div>
+            <p className="text-xs text-muted-foreground">
+              {exitType === "full" && "Sell 100% of position via Smart Routing"}
+              {exitType === "capital" && "Sell only the original BTC risked — profits stay in trade"}
+              {exitType === "emergency" && "Market order — immediate fill, no price guarantee"}
+            </p>
           </div>
 
-          {!isTestAccount && (
-            <div className="flex items-center gap-2 bg-orange-500/10 border border-orange-500/30 rounded-lg p-3 text-orange-400 text-sm">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-              This will sell 100% of the {position.pair.split("/")[0]} position using real client funds.
+          {exitType === "capital" && (
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Entry BTC Cost</Label>
+                <Input type="number" step="0.0001" placeholder="0.0000" value={capitalBtcCost} onChange={(e) => setCapitalBtcCost(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Current Price (BTC)</Label>
+                <Input type="number" step="0.0001" placeholder="0.0000" value={capitalCurrentPrice} onChange={(e) => setCapitalCurrentPrice(e.target.value)} />
+              </div>
             </div>
           )}
+
+          {exitType === "emergency" && (
+            <Alert variant="destructive">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription className="text-xs">
+                Market order — you may receive a significantly worse price than current market rate.
+              </AlertDescription>
+            </Alert>
+          )}
+        </div>
+
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={onClose} disabled={isLoading}>Cancel</Button>
+          <Button
+            variant={exitType === "emergency" ? "destructive" : "default"}
+            onClick={handleExit}
+            disabled={isLoading || (exitType === "capital" && (!capitalBtcCost || !capitalCurrentPrice))}
+          >
+            {isLoading ? "Executing…" : exitType === "emergency" ? "Execute Emergency Exit" : "Confirm Exit"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+interface TrailingStopDialogProps {
+  pair: string;
+  onClose: () => void;
+}
+
+function TrailingStopDialog({ pair, onClose }: TrailingStopDialogProps) {
+  const [stopPercent, setStopPercent] = useState("10");
+  const setTrailingStop = trpc.trading.setTrailingStop.useMutation();
+
+  async function handleSet() {
+    try {
+      const r = await setTrailingStop.mutateAsync({ pair, stopPercent: parseFloat(stopPercent) / 100 });
+      const ok = r.clientResults.filter((c) => c.success).length;
+      toast.success(`Trailing stop set — ${ok} client${ok !== 1 ? "s" : ""} updated`);
+      onClose();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to set trailing stop");
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Set Trailing Stop — {pair}</DialogTitle>
+          <DialogDescription>Places a SFOX trailing stop order for all clients holding this position.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            {["6", "10", "15"].map((p) => (
+              <Button key={p} size="sm" variant={stopPercent === p ? "default" : "outline"} className="flex-1" onClick={() => setStopPercent(p)}>
+                {p}%
+              </Button>
+            ))}
+          </div>
+          <Input type="number" step="0.5" min="1" max="50" value={stopPercent} onChange={(e) => setStopPercent(e.target.value)} placeholder="Custom %" />
+          <p className="text-xs text-muted-foreground">6% = low vol · 10% = medium · 15% = high vol</p>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">Cancel</Button>
-          <Button
-            onClick={handleExit}
-            disabled={exitMutation.isPending}
-            className={isTestAccount ? "bg-zinc-600 hover:bg-zinc-500" : "bg-red-600 hover:bg-red-700"}
-          >
-            {exitMutation.isPending ? "Closing..." : isTestAccount ? "Close Position (Test)" : "Close Position LIVE"}
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSet} disabled={setTrailingStop.isPending || !stopPercent || parseFloat(stopPercent) <= 0}>
+            {setTrailingStop.isPending ? "Setting…" : "Set Trailing Stop"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -120,25 +216,22 @@ function ExitDialog({ position, onClose, onSuccess }: ExitDialogProps) {
 
 export default function ActivePositions() {
   const { data: positions, isLoading, refetch } = trpc.positions.getAll.useQuery();
-  const { data: clients } = trpc.clients.getAll.useQuery();
-  const [exitPosition, setExitPosition] = useState<NonNullable<typeof positions>[number] | null>(null);
+  const [exitPosition, setExitPosition] = useState<Position | null>(null);
+  const [trailPair, setTrailPair] = useState<string | null>(null);
 
   const openCount = positions?.length ?? 0;
-  const profitableCount = positions?.filter(p => parseFloat(String(p.unrealizedPnlPercent ?? "0")) > 0).length ?? 0;
-  const trailingStopCount = positions?.filter(p => p.trailingStopTriggered).length ?? 0;
-
-  function getClientName(clientId: number) {
-    return clients?.find(c => c.id === clientId)?.clientName ?? `Client #${clientId}`;
-  }
+  const profitableCount = positions?.filter((p) => parseFloat(String(p.unrealizedPnlPercent ?? "0")) > 0).length ?? 0;
+  const trailingStopCount = positions?.filter((p) => p.trailingStopTriggered).length ?? 0;
+  const activePairs = Array.from(new Set(positions?.map((p) => p.pair) ?? []));
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-6 max-w-5xl">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-100">Active Positions</h1>
-          <p className="text-zinc-400 text-sm mt-1">Open rotation positions across all clients</p>
+          <h1 className="text-2xl font-semibold tracking-tight">Active Positions</h1>
+          <p className="text-sm text-muted-foreground mt-1">Open rotation positions across all clients</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => refetch()} className="border-zinc-700 text-zinc-300 hover:bg-zinc-800">
+        <Button variant="outline" size="sm" onClick={() => refetch()}>
           <RefreshCw className="w-4 h-4 mr-2" />Refresh
         </Button>
       </div>
@@ -146,98 +239,135 @@ export default function ActivePositions() {
       {/* Summary */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Open Positions", value: `${openCount} / 3 max`, color: openCount >= 3 ? "text-orange-400" : "text-zinc-100" },
-          { label: "Profitable", value: profitableCount, color: "text-emerald-400" },
-          { label: "Trailing Stop Triggered", value: trailingStopCount, color: trailingStopCount > 0 ? "text-red-400" : "text-zinc-100" },
-          { label: "Pairs Active", value: Array.from(new Set(positions?.map(p => p.pair) ?? [])).join(", ") || "—" },
-        ].map(s => (
-          <Card key={s.label} className="bg-zinc-900 border-zinc-800">
+          { label: "Open Positions", value: `${openCount} / 3 max`, highlight: openCount >= 3 ? "text-orange-500" : undefined },
+          { label: "Profitable", value: String(profitableCount), highlight: profitableCount > 0 ? "text-emerald-500" : undefined },
+          { label: "Trailing Stop Triggered", value: String(trailingStopCount), highlight: trailingStopCount > 0 ? "text-red-500" : undefined },
+          { label: "Active Pairs", value: activePairs.join(", ") || "—" },
+        ].map((s) => (
+          <Card key={s.label}>
             <CardContent className="py-4 px-5">
-              <div className="text-zinc-500 text-xs mb-1">{s.label}</div>
-              <div className={`text-xl font-bold truncate ${s.color ?? "text-zinc-100"}`}>{s.value}</div>
+              <div className="text-muted-foreground text-xs mb-1">{s.label}</div>
+              <div className={`text-xl font-bold truncate ${s.highlight ?? ""}`}>{s.value}</div>
             </CardContent>
           </Card>
         ))}
       </div>
 
       {isLoading ? (
-        <div className="space-y-3">{[1,2,3].map(i => <div key={i} className="h-24 bg-zinc-800 rounded-xl animate-pulse" />)}</div>
+        <div className="space-y-3">
+          {[1, 2, 3].map((i) => <div key={i} className="h-28 rounded-xl bg-muted animate-pulse" />)}
+        </div>
       ) : !positions || positions.length === 0 ? (
-        <Card className="bg-zinc-900 border-zinc-800">
-          <CardContent className="py-12 text-center text-zinc-500">
+        <Card>
+          <CardContent className="py-12 text-center text-muted-foreground">
             <Activity className="w-8 h-8 mx-auto mb-3 opacity-40" />
-            <p>No open positions. Execute a rotation entry from the Signal Feed.</p>
+            <p>No open positions. Execute a rotation entry from Manual Trading.</p>
           </CardContent>
         </Card>
       ) : (
         <div className="space-y-3">
-          {positions.map(pos => {
+          {positions.map((pos) => {
             const pnl = parseFloat(String(pos.unrealizedPnlPercent ?? "0"));
             const peak = parseFloat(String(pos.peakPnlPercent ?? "0"));
-            const trailingStop = parseFloat(String(pos.trailingStopPercent ?? "5"));
+            const trailStop = parseFloat(String(pos.trailingStopPercent ?? "0"));
             const entryPrice = parseFloat(String(pos.entryPrice));
             const currentPrice = parseFloat(String(pos.currentPrice ?? "0"));
+            const hasTrailingStop = trailStop > 0;
 
             return (
-              <Card key={pos.id} className={`bg-zinc-900 border-zinc-800 hover:border-zinc-700 transition-colors ${pos.trailingStopTriggered ? "border-red-500/50" : ""}`}>
+              <Card
+                key={pos.id}
+                className={pos.trailingStopTriggered ? "border-red-500/50" : ""}
+              >
                 <CardContent className="py-4 px-5">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-3 mb-1">
-                        <span className="font-semibold text-zinc-100 text-lg">{pos.pair}</span>
-                        <Badge variant="outline" className="border-zinc-700 text-zinc-400 text-xs">{getClientName(pos.clientId)}</Badge>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      {/* Header row */}
+                      <div className="flex items-center gap-3 mb-3">
+                        <span className="font-semibold text-lg">{pos.pair}</span>
+                        <Badge variant="outline" className="text-xs">{pos.sizePercent}% of BTC</Badge>
                         {pos.trailingStopTriggered && (
-                          <Badge className="bg-red-500/20 text-red-400 border-red-500/30 text-xs gap-1">
+                          <Badge variant="destructive" className="text-xs gap-1">
                             <AlertTriangle className="w-3 h-3" />Trailing Stop Hit
+                          </Badge>
+                        )}
+                        {hasTrailingStop && !pos.trailingStopTriggered && (
+                          <Badge variant="secondary" className="text-xs gap-1">
+                            <Shield className="w-3 h-3" />{(trailStop * 100).toFixed(0)}% trail
                           </Badge>
                         )}
                       </div>
 
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1 text-sm">
-                        <div>
-                          <span className="text-zinc-500">Entry</span>
-                          <span className="ml-2 text-zinc-300">{entryPrice.toFixed(8)}</span>
+                      {/* Data grid */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1.5 text-sm">
+                        <div className="flex gap-2">
+                          <span className="text-muted-foreground">Entry</span>
+                          <span>{entryPrice.toFixed(8)}</span>
                         </div>
                         {currentPrice > 0 && (
-                          <div>
-                            <span className="text-zinc-500">Current</span>
-                            <span className="ml-2 text-zinc-300">{currentPrice.toFixed(8)}</span>
+                          <div className="flex gap-2">
+                            <span className="text-muted-foreground">Current</span>
+                            <span>{currentPrice.toFixed(8)}</span>
                           </div>
                         )}
-                        <div>
-                          <span className="text-zinc-500">P&L</span>
-                          <span className={`ml-2 font-medium ${pnlColor(pnl)}`}>
+                        <div className="flex gap-2">
+                          <span className="text-muted-foreground">P&L</span>
+                          <span className={`font-medium ${pnlColor(pnl)}`}>
                             {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}%
                           </span>
                         </div>
-                        <div>
-                          <span className="text-zinc-500">Peak</span>
-                          <span className="ml-2 text-emerald-400">{peak > 0 ? "+" : ""}{peak.toFixed(2)}%</span>
+                        <div className="flex gap-2">
+                          <span className="text-muted-foreground">Peak</span>
+                          <span className="text-emerald-500">{peak > 0 ? "+" : ""}{peak.toFixed(2)}%</span>
                         </div>
-                        <div>
-                          <span className="text-zinc-500">Size</span>
-                          <span className="ml-2 text-zinc-300">{pos.sizePercent}% of BTC</span>
+                        <div className="flex gap-2">
+                          <span className="text-muted-foreground">Opened</span>
+                          <span className="text-muted-foreground">{new Date(pos.openedAt).toLocaleDateString()}</span>
                         </div>
-                        <div>
-                          <span className="text-zinc-500">Trail Stop</span>
-                          <span className="ml-2 text-zinc-300">{trailingStop}% from peak</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500">Opened</span>
-                          <span className="ml-2 text-zinc-400">{new Date(pos.openedAt).toLocaleDateString()}</span>
-                        </div>
+                        {hasTrailingStop && (
+                          <div className="flex gap-2">
+                            <span className="text-muted-foreground">Trail Stop</span>
+                            <span>{(trailStop * 100).toFixed(0)}% from peak</span>
+                          </div>
+                        )}
                       </div>
                     </div>
 
+                    {/* Action buttons */}
                     <div className="flex flex-col gap-2 shrink-0">
-                      {pnl > 0 ? <TrendingUp className="w-5 h-5 text-emerald-400 mx-auto" /> : <TrendingDown className="w-5 h-5 text-red-400 mx-auto" />}
+                      {pnl > 0 ? (
+                        <TrendingUp className="w-4 h-4 text-emerald-500 mx-auto" />
+                      ) : (
+                        <TrendingDown className="w-4 h-4 text-red-500 mx-auto" />
+                      )}
                       <Button
                         size="sm"
-                        onClick={() => setExitPosition(pos)}
-                        className={pos.trailingStopTriggered ? "bg-red-600 hover:bg-red-700 text-white" : "bg-zinc-700 hover:bg-zinc-600 text-zinc-100"}
+                        variant={pos.trailingStopTriggered ? "destructive" : "default"}
+                        onClick={() => setExitPosition(pos as Position)}
+                        className="text-xs"
                       >
                         {pos.trailingStopTriggered ? "Exit Now" : "Close"}
                       </Button>
+                      {!hasTrailingStop && pnl > 0 && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setTrailPair(pos.pair)}
+                          className="text-xs gap-1"
+                        >
+                          <Shield className="w-3 h-3" />Trail
+                        </Button>
+                      )}
+                      {pos.trailingStopTriggered && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setExitPosition({ ...pos as Position })}
+                          className="text-xs gap-1 border-orange-500/50 text-orange-500"
+                        >
+                          <Zap className="w-3 h-3" />Emergency
+                        </Button>
+                      )}
                     </div>
                   </div>
                 </CardContent>
@@ -252,6 +382,13 @@ export default function ActivePositions() {
           position={exitPosition}
           onClose={() => setExitPosition(null)}
           onSuccess={() => refetch()}
+        />
+      )}
+
+      {trailPair && (
+        <TrailingStopDialog
+          pair={trailPair}
+          onClose={() => setTrailPair(null)}
         />
       )}
     </div>

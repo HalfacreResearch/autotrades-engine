@@ -1,0 +1,9 @@
+{
+  "query": "ALTER TABLE `client_connections` ADD `initial_buy_executed` boolean DEFAULT true NOT NULL;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway02.us-east-1.prod.aws.tidbcloud.com --port 4000 --user wW9zg8WGoGMRU7L.ed0327622c76 --database YMZw8YCe5DZgipY5uR2Ycn --execute ALTER TABLE `client_connections` ADD `initial_buy_executed` boolean DEFAULT true NOT NULL;",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 1015
+}

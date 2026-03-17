@@ -1,0 +1,1 @@
+ALTER TABLE `client_connections` ADD `initial_buy_executed` boolean DEFAULT true NOT NULL;

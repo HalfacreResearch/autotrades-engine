@@ -10,6 +10,7 @@ import TradeLog from "./pages/TradeLog";
 import Home from "./pages/Home";
 import Dashboard from "./pages/Dashboard";
 import MLPredictions from "./pages/MLPredictions";
+import ManualTrading from "./pages/ManualTrading";
 
 function Router() {
   return (
@@ -33,6 +34,11 @@ function Router() {
       <Route path="/log">
         <DashboardLayout>
           <TradeLog />
+        </DashboardLayout>
+      </Route>
+      <Route path="/manual">
+        <DashboardLayout>
+          <ManualTrading />
         </DashboardLayout>
       </Route>
       <Route path="/404" component={NotFound} />

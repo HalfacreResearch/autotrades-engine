@@ -15,6 +15,13 @@
       "when": 1773664248557,
       "tag": "0001_broken_steel_serpent",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1773788690282,
+      "tag": "0002_tan_lester",
+      "breakpoints": true
     }
   ]
 }

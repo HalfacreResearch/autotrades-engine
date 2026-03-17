@@ -53,6 +53,13 @@ export const clientConnections = mysqlTable("client_connections", {
   connectionStatus: mysqlEnum("connection_status", ["connected", "error", "pending", "unconfigured"])
     .default("unconfigured")
     .notNull(),
+  /**
+   * Whether the initial 25% USD-to-BTC buy has been executed for this client.
+   * Defaults to TRUE for all existing clients (set via migration) to prevent
+   * accidentally re-firing the initial buy on clients who are already onboarded.
+   * Only set to FALSE for genuinely new clients who have not yet had their first trade.
+   */
+  initialBuyExecuted: boolean("initial_buy_executed").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

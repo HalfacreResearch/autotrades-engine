@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/sidebar";
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { Zap, LogOut, PanelLeft, Activity, FileText, LayoutDashboard, Brain } from "lucide-react";
+import { Zap, LogOut, PanelLeft, Activity, FileText, LayoutDashboard, Brain, SlidersHorizontal } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
@@ -31,6 +31,7 @@ const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Brain, label: "ML Predictions", path: "/ml" },
   { icon: Activity, label: "Active Positions", path: "/positions" },
+  { icon: SlidersHorizontal, label: "Manual Trading", path: "/manual" },
   { icon: FileText, label: "Execution Log", path: "/log" },
 ];
 
