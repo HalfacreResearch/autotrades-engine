@@ -144,4 +144,13 @@
 - [x] Dashboard — pending initial buy alerts, trailing stop triggered alerts, clean theme-aware styling
 - [x] Manual Trading added to sidebar navigation (5 nav items total)
 - [x] All 11 tests passing, TypeScript clean (0 errors)
-- [ ] Save checkpoint and push to GitHub
+- [x] Save checkpoint and push to GitHub
+
+## Remove Manus-Hosted DB — Point Everything to VPS MySQL (March 17, 2026)
+- [ ] Verify codex_portal on VPS has all required tables: client_connections, execution_log, autotrades_active_positions, users
+- [ ] Rewrite db.ts — remove getDb()/DATABASE_URL entirely, all operations use CLIENT_PORTAL_DATABASE_URL or TRADINGHQ_DATABASE_URL
+- [ ] Update drizzle/schema.ts — keep type definitions only for VPS tables
+- [ ] Update routers.ts auth/user procedures to use CLIENT_PORTAL_DATABASE_URL for user session storage
+- [ ] Remove all DATABASE_URL references from all engine files
+- [ ] TypeScript clean, all tests passing
+- [ ] Save checkpoint and push to GitHub for Hostinger auto-deploy

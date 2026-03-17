@@ -20,8 +20,8 @@
  *   - Every execution logged to codex_portal execution_log
  */
 
-import { getAllClients, insertExecutionLog, updateExecutionLog } from "./db";
-import { decryptApiKey, executeDCABuy, generateClientOrderId } from "./sfoxEngine";
+import { getAllClients, insertExecutionLog } from "./db";
+import { executeDCABuy, generateClientOrderId } from "./sfoxEngine";
 
 export interface DCASignal {
   prediction: string;   // "BUY" | "STRONG_BUY" | "HOLD" | "SELL" | "STRONG_SELL"
@@ -35,8 +35,8 @@ export interface DCAEngineResult {
   positionSizePercent: number;
   signalStrength: string;
   clientResults: Array<{
-    clientId: number;
-    clientName: string;
+    userId: number;
+    name: string | null;
     success: boolean;
     orderId?: number;
     usdAmount?: number;
@@ -140,84 +140,42 @@ export async function runDCAEngine(
   }
 
   const allClients = await getAllClients();
-  const clients = allClients.filter((c) => c.isActive);
+  const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
   const clientResults: DCAEngineResult["clientResults"] = [];
 
   for (const client of clients) {
-    if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-      clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
-        success: false,
-        error: "No SFOX API key configured",
-      });
-      continue;
-    }
-
-    let apiKey: string;
-    try {
-      apiKey = decryptApiKey(
-        client.sfoxApiKeyEncrypted,
-        client.sfoxApiKeyIv,
-        client.sfoxApiKeyAuthTag
-      );
-    } catch (err) {
-      clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
-        success: false,
-        error: `Failed to decrypt API key: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      continue;
-    }
-
-    const executionId = `dca-${client.id}-${Date.now()}`;
-
-    // Log pending
-    await insertExecutionLog({
-      executionId,
-      clientId: client.id,
-      tradeType: "DCA_BUY",
-      pair: "BTC/USD",
-      side: "buy",
-      positionSizePercent: String(positionSizePercent),
-      status: dryRun ? "pending" : "pending",
-      isTestAccount: false,
-    });
-
     if (dryRun) {
       clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
+        userId: client.userId,
+        name: client.name,
         success: true,
         usdAmount: 0, // would need balance fetch for dry run estimate
-      });
-      await updateExecutionLog(executionId, {
-        status: "cancelled",
-        errorMessage: "Dry run — no order placed",
       });
       continue;
     }
 
     const result = await executeDCABuy({
-      apiKey,
+      apiKey: client.sfoxApiKey,
       positionSizePercent,
       clientOrderId: generateClientOrderId("DCA", "BTCUSD"),
     });
 
-    await updateExecutionLog(executionId, {
-      status: result.success ? "executed" : "failed",
-      sfoxOrderId: result.orderId ? String(result.orderId) : undefined,
-      executionPrice: result.executionPrice ? String(result.executionPrice) : undefined,
-      quantity: result.quantity ? String(result.quantity) : undefined,
-      usdValue: result.usdValue ? String(result.usdValue) : undefined,
-      errorMessage: result.error,
-      executedAt: new Date(),
+    await insertExecutionLog({
+      userId: client.userId,
+      pair: "BTC/USD",
+      strategy: "DCA",
+      side: "buy",
+      quantity: String(result.quantity ?? "0"),
+      price: String(result.executionPrice ?? "0"),
+      totalUsd: result.usdValue ? String(result.usdValue) : null,
+      sfoxOrderId: result.orderId ? String(result.orderId) : null,
+      status: result.success ? "filled" : "failed",
+      notes: result.error ?? null,
     });
 
     clientResults.push({
-      clientId: client.id,
-      clientName: client.clientName,
+      userId: client.userId,
+      name: client.name,
       success: result.success,
       orderId: result.orderId,
       usdAmount: result.usdValue,

@@ -8,20 +8,21 @@ import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
   closePosition,
   getAllClients,
-  getClientById,
+  getClientByUserId,
   getExecutionLog,
   getLatestMlPredictions,
   getLatestRuleBasedSignals,
   getOpenPositionCount,
   getOpenPositions,
+  getPendingInitialBuyClients,
   insertExecutionLog,
   insertPosition,
-  updateExecutionLog,
-  updatePositionPnl,
+  markInitialBuyExecuted,
+  setTrailingStop,
+  updatePositionPrices,
 } from "./db";
 import {
   calculateVolatilityTier,
-  decryptApiKey,
   executeCapitalExit,
   executeDCABuy,
   executeEmergencyExit,
@@ -73,26 +74,29 @@ export const appRouter = router({
   clients: router({
     getAll: protectedProcedure.query(async () => {
       const clients = await getAllClients();
-      // Never return encrypted API key fields to the frontend
+      // Never return the raw SFOX API key to the frontend
       return clients.map((c) => ({
-        id: c.id,
-        clientName: c.clientName,
-        clientEmail: c.clientEmail,
+        userId: c.userId,
+        credentialId: c.credentialId,
+        name: c.name,
+        email: c.email,
         isActive: c.isActive,
-        connectionStatus: c.connectionStatus,
-        lastVerifiedAt: c.lastVerifiedAt,
-        hasApiKey: !!(c.sfoxApiKeyEncrypted && c.sfoxApiKeyIv && c.sfoxApiKeyAuthTag),
-        createdAt: c.createdAt,
+        autoTradeEnabled: c.autoTradeEnabled,
+        hasApiKey: !!c.sfoxApiKey,
+        initialBuyExecuted: c.initialBuyExecuted,
       }));
     }),
 
     // Returns clients who have an API key but have never had their initial 25% BTC buy executed.
     // These appear as alerts on the Dashboard prompting Matthew to execute the manual initial buy.
     getPendingInitialBuy: protectedProcedure.query(async () => {
-      const clients = await getAllClients();
-      return clients
-        .filter((c) => c.isActive && c.sfoxApiKeyEncrypted && !c.initialBuyExecuted)
-        .map((c) => ({ id: c.id, clientName: c.clientName }));
+      const clients = await getPendingInitialBuyClients();
+      return clients.map((c) => ({
+        userId: c.userId,
+        credentialId: c.credentialId,
+        name: c.name,
+        email: c.email,
+      }));
     }),
   }),
 
@@ -101,31 +105,21 @@ export const appRouter = router({
     runChecks: protectedProcedure
       .input(
         z.object({
-          clientId: z.number(),
+          userId: z.number(),
           tradeType: z.enum(["DCA_BUY", "ROTATION_ENTRY", "ROTATION_EXIT"]),
           pair: z.string(),
           positionSizePercent: z.number().min(0.1).max(100),
-          currentMarketPrice: z.number().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
-        const client = await getClientById(input.clientId);
-        if (!client?.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-          return {
-            passed: false,
-            warnings: [],
-            errors: ["No SFOX API key configured for this client"],
-          };
+        const client = await getClientByUserId(input.userId);
+        if (!client?.sfoxApiKey) {
+          return { passed: false, warnings: [], errors: ["No SFOX API key configured for this client"] };
         }
-        const apiKey = decryptApiKey(
-          client.sfoxApiKeyEncrypted,
-          client.sfoxApiKeyIv,
-          client.sfoxApiKeyAuthTag
-        );
-        const openPositionCount = await getOpenPositionCount(input.clientId);
+        const openPositionCount = await getOpenPositionCount(input.userId);
         const result = await runSafetyChecks({
-          apiKey,
+          apiKey: client.sfoxApiKey,
           tradeType: input.tradeType,
           pair: input.pair,
           positionSizePercent: input.positionSizePercent,
@@ -147,30 +141,22 @@ export const appRouter = router({
     executeDCA: protectedProcedure
       .input(
         z.object({
-          clientId: z.number(),
-          positionSizePercent: z.number().min(1).max(100),
-          isTestAccount: z.boolean().default(true),
-          recommendationId: z.string().optional(),
-          currentMarketPrice: z.number().optional(),
+          userId: z.number(),
+          positionSizePercent: z.number().min(1).max(10),
+          recommendationId: z.number().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
 
-        const client = await getClientById(input.clientId);
-        if (!client?.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
+        const client = await getClientByUserId(input.userId);
+        if (!client?.sfoxApiKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "No SFOX API key configured for this client" });
         }
 
-        const apiKey = decryptApiKey(
-          client.sfoxApiKeyEncrypted,
-          client.sfoxApiKeyIv,
-          client.sfoxApiKeyAuthTag
-        );
-
-        const openPositionCount = await getOpenPositionCount(input.clientId);
+        const openPositionCount = await getOpenPositionCount(input.userId);
         const safetyResult = await runSafetyChecks({
-          apiKey,
+          apiKey: client.sfoxApiKey,
           tradeType: "DCA_BUY",
           pair: "BTC/USD",
           positionSizePercent: input.positionSizePercent,
@@ -184,40 +170,29 @@ export const appRouter = router({
           });
         }
 
-        const executionId = nanoid();
-
-        await insertExecutionLog({
-          executionId,
-          clientId: input.clientId,
-          recommendationId: input.recommendationId,
-          tradeType: "DCA_BUY",
-          pair: "BTC/USD",
-          side: "buy",
-          positionSizePercent: String(input.positionSizePercent),
-          status: "pending",
-          isTestAccount: input.isTestAccount,
-          executedBy: ctx.user?.id,
-        });
-
         const result = await executeDCABuy({
-          apiKey,
+          apiKey: client.sfoxApiKey,
           positionSizePercent: input.positionSizePercent,
           clientOrderId: generateClientOrderId("DCA", "BTCUSD"),
         });
 
-        await updateExecutionLog(executionId, {
-          status: result.success ? "executed" : "failed",
-          sfoxOrderId: result.orderId ? String(result.orderId) : undefined,
-          executionPrice: result.executionPrice ? String(result.executionPrice) : undefined,
-          quantity: result.quantity ? String(result.quantity) : undefined,
-          usdValue: result.usdValue ? String(result.usdValue) : undefined,
-          errorMessage: result.error,
-          executedAt: new Date(),
+        const logId = await insertExecutionLog({
+          userId: input.userId,
+          recommendationId: input.recommendationId,
+          pair: "BTC/USD",
+          strategy: "DCA",
+          side: "buy",
+          quantity: String(result.quantity ?? "0"),
+          price: String(result.executionPrice ?? "0"),
+          totalUsd: result.usdValue ? String(result.usdValue) : null,
+          sfoxOrderId: result.orderId ? String(result.orderId) : null,
+          status: result.success ? "filled" : "failed",
+          notes: result.error ?? null,
         });
 
         return {
           success: result.success,
-          executionId,
+          logId,
           orderId: result.orderId,
           executionPrice: result.executionPrice,
           quantity: result.quantity,
@@ -229,31 +204,23 @@ export const appRouter = router({
     executeRotationEntry: protectedProcedure
       .input(
         z.object({
-          clientId: z.number(),
+          userId: z.number(),
           pair: z.string().regex(/^[A-Z]+\/BTC$/, "Must be an ALT/BTC pair"),
           positionSizePercent: z.number().min(2).max(12),
-          isTestAccount: z.boolean().default(true),
-          recommendationId: z.string().optional(),
-          currentMarketPrice: z.number().optional(),
+          recommendationId: z.number().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
 
-        const client = await getClientById(input.clientId);
-        if (!client?.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
+        const client = await getClientByUserId(input.userId);
+        if (!client?.sfoxApiKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "No SFOX API key configured for this client" });
         }
 
-        const apiKey = decryptApiKey(
-          client.sfoxApiKeyEncrypted,
-          client.sfoxApiKeyIv,
-          client.sfoxApiKeyAuthTag
-        );
-
-        const openPositionCount = await getOpenPositionCount(input.clientId);
+        const openPositionCount = await getOpenPositionCount(input.userId);
         const safetyResult = await runSafetyChecks({
-          apiKey,
+          apiKey: client.sfoxApiKey,
           tradeType: "ROTATION_ENTRY",
           pair: input.pair,
           positionSizePercent: input.positionSizePercent,
@@ -267,51 +234,41 @@ export const appRouter = router({
           });
         }
 
-        const executionId = nanoid();
-
-        await insertExecutionLog({
-          executionId,
-          clientId: input.clientId,
-          recommendationId: input.recommendationId,
-          tradeType: "ROTATION_ENTRY",
-          pair: input.pair,
-          side: "buy",
-          positionSizePercent: String(input.positionSizePercent),
-          status: "pending",
-          isTestAccount: input.isTestAccount,
-          executedBy: ctx.user?.id,
-        });
-
         const result = await executeRotationEntry({
-          apiKey,
+          apiKey: client.sfoxApiKey,
           pair: input.pair,
           positionSizePercent: input.positionSizePercent,
           clientOrderId: generateClientOrderId("ROT_ENTRY", input.pair.replace("/", "")),
         });
 
-        await updateExecutionLog(executionId, {
-          status: result.success ? "executed" : "failed",
-          sfoxOrderId: result.orderId ? String(result.orderId) : undefined,
-          executionPrice: result.executionPrice ? String(result.executionPrice) : undefined,
-          quantity: result.quantity ? String(result.quantity) : undefined,
-          errorMessage: result.error,
-          executedAt: new Date(),
+        const logId = await insertExecutionLog({
+          userId: input.userId,
+          recommendationId: input.recommendationId,
+          pair: input.pair,
+          strategy: "ROTATION",
+          side: "buy",
+          quantity: String(result.quantity ?? "0"),
+          price: String(result.executionPrice ?? "0"),
+          sfoxOrderId: result.orderId ? String(result.orderId) : null,
+          status: result.success ? "filled" : "failed",
+          notes: result.error ?? null,
         });
 
-        if (result.success && result.executionPrice) {
+        if (result.success && result.executionPrice && result.quantity) {
           await insertPosition({
-            clientId: input.clientId,
+            userId: input.userId,
             pair: input.pair,
-            sizePercent: String(input.positionSizePercent),
+            strategy: "ROTATION",
+            entryExecutionId: logId,
             entryPrice: String(result.executionPrice),
-            openExecutionId: executionId,
+            entryBtcAmount: String(result.quantity),
             status: "open",
           });
         }
 
         return {
           success: result.success,
-          executionId,
+          logId,
           orderId: result.orderId,
           executionPrice: result.executionPrice,
           quantity: result.quantity,
@@ -323,98 +280,64 @@ export const appRouter = router({
     executeRotationExit: protectedProcedure
       .input(
         z.object({
-          clientId: z.number(),
+          userId: z.number(),
           positionId: z.number(),
           pair: z.string(),
           entryPrice: z.number(),
-          isTestAccount: z.boolean().default(true),
-          sellPercent: z.number().min(1).max(100).default(100),
+          entryBtcAmount: z.number(),
         })
       )
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
 
-        const client = await getClientById(input.clientId);
-        if (!client?.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
+        const client = await getClientByUserId(input.userId);
+        if (!client?.sfoxApiKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "No SFOX API key configured for this client" });
         }
 
-        const apiKey = decryptApiKey(
-          client.sfoxApiKeyEncrypted,
-          client.sfoxApiKeyIv,
-          client.sfoxApiKeyAuthTag
-        );
-
-        const openPositionCount = await getOpenPositionCount(input.clientId);
-        const safetyResult = await runSafetyChecks({
-          apiKey,
-          tradeType: "ROTATION_EXIT",
-          pair: input.pair,
-          positionSizePercent: input.sellPercent,
-          openPositionCount,
-        });
-
-        if (!safetyResult.passed) {
-          throw new TRPCError({
-            code: "PRECONDITION_FAILED",
-            message: `Safety checks failed: ${safetyResult.errors.join("; ")}`,
-          });
-        }
-
-        const executionId = nanoid();
-
-        await insertExecutionLog({
-          executionId,
-          clientId: input.clientId,
-          tradeType: "ROTATION_EXIT",
-          pair: input.pair,
-          side: "sell",
-          positionSizePercent: String(input.sellPercent),
-          entryPrice: String(input.entryPrice),
-          status: "pending",
-          isTestAccount: input.isTestAccount,
-          executedBy: ctx.user?.id,
-        });
-
-        // Fetch live altcoin balance from SFOX to determine exact quantity to sell
         const altCurrency = input.pair.split("/")[0] ?? "";
-        const altBal = await getBalance(altCurrency, apiKey);
+        const altBal = await getBalance(altCurrency, client.sfoxApiKey);
         const sellQuantity = altBal?.available ?? 0;
         if (sellQuantity <= 0) {
           throw new TRPCError({ code: "BAD_REQUEST", message: `No ${altCurrency} balance available to sell` });
         }
+
         const result = await executeRotationExit({
-          apiKey,
+          apiKey: client.sfoxApiKey,
           pair: input.pair,
           quantity: sellQuantity,
           clientOrderId: generateClientOrderId("ROT_EXIT", input.pair.replace("/", "")),
         });
 
-        let realizedPnlPercent = 0;
+        let btcPnl = 0;
         if (result.success && result.executionPrice && input.entryPrice > 0) {
-          realizedPnlPercent = ((result.executionPrice - input.entryPrice) / input.entryPrice) * 100;
+          const pnlPct = (result.executionPrice - input.entryPrice) / input.entryPrice;
+          btcPnl = input.entryBtcAmount * pnlPct;
         }
 
-        await updateExecutionLog(executionId, {
-          status: result.success ? "executed" : "failed",
-          sfoxOrderId: result.orderId ? String(result.orderId) : undefined,
-          executionPrice: result.executionPrice ? String(result.executionPrice) : undefined,
-          quantity: result.quantity ? String(result.quantity) : undefined,
-          realizedPnlPercent: String(realizedPnlPercent.toFixed(4)),
-          errorMessage: result.error,
-          executedAt: new Date(),
+        const logId = await insertExecutionLog({
+          userId: input.userId,
+          pair: input.pair,
+          strategy: "ROTATION",
+          side: "sell",
+          quantity: String(result.quantity ?? "0"),
+          price: String(result.executionPrice ?? "0"),
+          sfoxOrderId: result.orderId ? String(result.orderId) : null,
+          status: result.success ? "filled" : "failed",
+          btcPnl: btcPnl !== 0 ? String(btcPnl.toFixed(8)) : null,
+          notes: result.error ?? null,
         });
 
-        if (result.success && result.executionPrice) {
-          await closePosition(input.positionId, result.executionPrice, realizedPnlPercent);
+        if (result.success) {
+          await closePosition(input.positionId, logId);
         }
 
         return {
           success: result.success,
-          executionId,
+          logId,
           orderId: result.orderId,
           executionPrice: result.executionPrice,
-          realizedPnlPercent,
+          btcPnl,
           error: result.error,
         };
       }),
@@ -423,13 +346,12 @@ export const appRouter = router({
   // ─── Active Positions ──────────────────────────────────────────────────────
   positions: router({
     getAll: protectedProcedure
-      .input(z.object({ clientId: z.number().optional() }).optional())
+      .input(z.object({ userId: z.number().optional() }).optional())
       .query(async ({ input }) => {
-        const positions = await getOpenPositions(input?.clientId);
-        return positions;
+        return getOpenPositions(input?.userId);
       }),
 
-    refreshPnl: protectedProcedure
+    refreshPrices: protectedProcedure
       .input(
         z.object({
           positionId: z.number(),
@@ -442,38 +364,39 @@ export const appRouter = router({
         if (!position) throw new TRPCError({ code: "NOT_FOUND", message: "Position not found" });
 
         const entryPrice = parseFloat(String(position.entryPrice));
-        const unrealizedPnlPercent = ((input.currentPrice - entryPrice) / entryPrice) * 100;
-        const currentPeak = parseFloat(String(position.peakPnlPercent ?? "0"));
-        const newPeak = Math.max(currentPeak, unrealizedPnlPercent);
-        const trailingStop = parseFloat(String(position.trailingStopPercent ?? "5"));
-        const trailingStopTriggered = newPeak > 0 && unrealizedPnlPercent < newPeak - trailingStop;
+        const entryBtcAmount = parseFloat(String(position.entryBtcAmount));
+        const unrealizedBtcPnl = entryBtcAmount * ((input.currentPrice - entryPrice) / entryPrice);
+        const currentPeak = parseFloat(String(position.peakPrice ?? String(entryPrice)));
+        const newPeak = Math.max(currentPeak, input.currentPrice);
 
-        await updatePositionPnl(
+        // Auto-set trailing stop if position is net profitable and no stop is set yet
+        const trailingStopPct = parseFloat(String(position.trailingStopPct ?? "0.05"));
+        const trailingStopPrice = position.trailingStopPrice
+          ? parseFloat(String(position.trailingStopPrice))
+          : null;
+        const newTrailingStopPrice = trailingStopPrice ?? (unrealizedBtcPnl > 0 ? newPeak * (1 - trailingStopPct) : undefined);
+
+        await updatePositionPrices(
           input.positionId,
           input.currentPrice,
-          unrealizedPnlPercent,
           newPeak,
-          trailingStopTriggered
+          unrealizedBtcPnl,
+          newTrailingStopPrice
         );
 
-        return {
-          unrealizedPnlPercent,
-          peakPnlPercent: newPeak,
-          trailingStopTriggered,
-        };
+        return { unrealizedBtcPnl, peakPrice: newPeak, trailingStopPrice: newTrailingStopPrice };
       }),
   }),
 
   // ─── Manual Trading Endpoints ────────────────────────────────────────────
   trading: router({
     /**
-     * Get an order estimate (price, fees, quantity) before confirming a trade.
-     * Used for the confirmation screen on manual trades.
+     * Get an order estimate before confirming a manual trade.
      */
     getOrderEstimate: protectedProcedure
       .input(
         z.object({
-          clientId: z.number(),
+          userId: z.number(),
           side: z.enum(["buy", "sell"]),
           pair: z.string(),
           quantity: z.number().optional(),
@@ -482,19 +405,14 @@ export const appRouter = router({
       )
       .query(async ({ ctx, input }) => {
         requireAdmin(ctx);
-        const client = await getClientById(input.clientId);
-        if (!client?.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
+        const client = await getClientByUserId(input.userId);
+        if (!client?.sfoxApiKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "No SFOX API key configured" });
         }
-        const apiKey = decryptApiKey(
-          client.sfoxApiKeyEncrypted,
-          client.sfoxApiKeyIv,
-          client.sfoxApiKeyAuthTag
-        );
         return getOrderEstimate({
           side: input.side,
           pair: input.pair,
-          apiKey,
+          apiKey: client.sfoxApiKey,
           quantity: input.quantity,
           maxspend: input.maxspend,
         });
@@ -503,44 +421,35 @@ export const appRouter = router({
     /**
      * Execute the one-time 25% initial BTC purchase for a new client.
      * MANUAL ONLY — never called by the scheduler.
-     * Fires for a single specified client only.
      */
     executeInitialBuy: protectedProcedure
-      .input(z.object({ clientId: z.number() }))
+      .input(z.object({ userId: z.number() }))
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
-        const client = await getClientById(input.clientId);
-        if (!client?.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
+        const client = await getClientByUserId(input.userId);
+        if (!client?.sfoxApiKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "No SFOX API key configured" });
         }
-        const apiKey = decryptApiKey(
-          client.sfoxApiKeyEncrypted,
-          client.sfoxApiKeyIv,
-          client.sfoxApiKeyAuthTag
-        );
-        const executionId = nanoid();
-        await insertExecutionLog({
-          executionId,
-          clientId: input.clientId,
-          tradeType: "DCA_BUY",
+        if (client.initialBuyExecuted) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Initial buy has already been executed for this client" });
+        }
+        const result = await executeInitialBuy({ apiKey: client.sfoxApiKey });
+        const logId = await insertExecutionLog({
+          userId: input.userId,
           pair: "BTC/USD",
+          strategy: "DCA",
           side: "buy",
-          positionSizePercent: "25",
-          status: "pending",
-          isTestAccount: false,
-          executedBy: ctx.user?.id,
+          quantity: String(result.quantity ?? "0"),
+          price: String(result.executionPrice ?? "0"),
+          totalUsd: result.usdValue ? String(result.usdValue) : null,
+          sfoxOrderId: result.orderId ? String(result.orderId) : null,
+          status: result.success ? "filled" : "failed",
+          notes: result.success ? "Initial 25% BTC purchase" : (result.error ?? null),
         });
-        const result = await executeInitialBuy({ apiKey });
-        await updateExecutionLog(executionId, {
-          status: result.success ? "executed" : "failed",
-          sfoxOrderId: result.orderId ? String(result.orderId) : undefined,
-          executionPrice: result.executionPrice ? String(result.executionPrice) : undefined,
-          quantity: result.quantity ? String(result.quantity) : undefined,
-          usdValue: result.usdValue ? String(result.usdValue) : undefined,
-          errorMessage: result.error,
-          executedAt: new Date(),
-        });
-        return { success: result.success, executionId, orderId: result.orderId, executionPrice: result.executionPrice, quantity: result.quantity, error: result.error };
+        if (result.success) {
+          await markInitialBuyExecuted(client.credentialId);
+        }
+        return { success: result.success, logId, orderId: result.orderId, executionPrice: result.executionPrice, quantity: result.quantity, error: result.error };
       }),
 
     /**
@@ -557,77 +466,106 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
         const allClients = await getAllClients();
-        const clients = allClients.filter((c) => c.isActive);
+        const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
         const clientResults = [];
         for (const client of clients) {
-          if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: false, error: "No API key" });
-            continue;
-          }
-          const apiKey = decryptApiKey(client.sfoxApiKeyEncrypted, client.sfoxApiKeyIv, client.sfoxApiKeyAuthTag);
-          const openPositions = await getOpenPositions(client.id);
+          const openPositions = await getOpenPositions(client.userId);
           const existingExposure = openPositions
             .filter((p) => p.pair.toUpperCase() === input.pair.toUpperCase())
-            .reduce((sum, p) => sum + Number(p.sizePercent), 0);
-          const newTotal = existingExposure + input.positionSizePercent;
-          if (newTotal > 12) {
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: false, error: `Total exposure would be ${newTotal}% (max 12%)` });
+            .reduce((sum, p) => sum + Number(p.entryBtcAmount), 0);
+          // Check max 12% total exposure per altcoin (approximate via position count × avg size)
+          const openPairPositions = openPositions.filter((p) => p.pair.toUpperCase() === input.pair.toUpperCase());
+          if (openPairPositions.length >= 3) {
+            clientResults.push({ userId: client.userId, name: client.name, success: false, error: "Max 12% exposure reached (3 entries)" });
             continue;
           }
-          const executionId = nanoid();
-          await insertExecutionLog({ executionId, clientId: client.id, tradeType: "ROTATION_ENTRY", pair: input.pair, side: "buy", positionSizePercent: String(input.positionSizePercent), status: "pending", isTestAccount: false, executedBy: ctx.user?.id });
-          const result = await executeRotationEntry({ apiKey, pair: input.pair, positionSizePercent: input.positionSizePercent, clientOrderId: generateClientOrderId("MANUAL-ENTRY", input.pair) });
-          await updateExecutionLog(executionId, { status: result.success ? "executed" : "failed", sfoxOrderId: result.orderId ? String(result.orderId) : undefined, executionPrice: result.executionPrice ? String(result.executionPrice) : undefined, quantity: result.quantity ? String(result.quantity) : undefined, errorMessage: result.error, executedAt: new Date() });
-          if (result.success && result.executionPrice) {
-            await insertPosition({ clientId: client.id, pair: input.pair, sizePercent: String(input.positionSizePercent), entryPrice: String(result.executionPrice), openExecutionId: executionId, status: "open" });
+          const result = await executeRotationEntry({
+            apiKey: client.sfoxApiKey,
+            pair: input.pair,
+            positionSizePercent: input.positionSizePercent,
+            clientOrderId: generateClientOrderId("MANUAL-ENTRY", input.pair),
+          });
+          const logId = await insertExecutionLog({
+            userId: client.userId,
+            pair: input.pair,
+            strategy: "ROTATION",
+            side: "buy",
+            quantity: String(result.quantity ?? "0"),
+            price: String(result.executionPrice ?? "0"),
+            sfoxOrderId: result.orderId ? String(result.orderId) : null,
+            status: result.success ? "filled" : "failed",
+            notes: result.error ?? null,
+          });
+          if (result.success && result.executionPrice && result.quantity) {
+            await insertPosition({
+              userId: client.userId,
+              pair: input.pair,
+              strategy: "ROTATION",
+              entryExecutionId: logId,
+              entryPrice: String(result.executionPrice),
+              entryBtcAmount: String(result.quantity),
+              status: "open",
+            });
           }
-          clientResults.push({ clientId: client.id, clientName: client.clientName, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
+          clientResults.push({ userId: client.userId, name: client.name, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
         }
         return { clientResults };
       }),
 
     /**
      * Execute a full rotation exit across ALL active clients simultaneously.
-     * Sells 100% of the altcoin position via Smart Routing.
      */
     executeManualExit: protectedProcedure
       .input(z.object({ pair: z.string() }))
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
         const allClients = await getAllClients();
-        const clients = allClients.filter((c) => c.isActive);
+        const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
         const clientResults = [];
         const altCurrency = input.pair.split("/")[0] ?? "";
         for (const client of clients) {
-          if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: false, error: "No API key" });
-            continue;
-          }
-          const apiKey = decryptApiKey(client.sfoxApiKeyEncrypted, client.sfoxApiKeyIv, client.sfoxApiKeyAuthTag);
-          const altBal = await getBalance(altCurrency, apiKey);
+          const altBal = await getBalance(altCurrency, client.sfoxApiKey);
           const quantity = altBal?.available ?? 0;
           if (quantity <= 0) {
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: false, error: `No ${altCurrency} balance` });
+            clientResults.push({ userId: client.userId, name: client.name, success: false, error: `No ${altCurrency} balance` });
             continue;
           }
-          const executionId = nanoid();
-          await insertExecutionLog({ executionId, clientId: client.id, tradeType: "ROTATION_EXIT", pair: input.pair, side: "sell", positionSizePercent: "100", status: "pending", isTestAccount: false, executedBy: ctx.user?.id });
-          const result = await executeRotationExit({ apiKey, pair: input.pair, quantity, clientOrderId: generateClientOrderId("MANUAL-EXIT", input.pair) });
-          await updateExecutionLog(executionId, { status: result.success ? "executed" : "failed", sfoxOrderId: result.orderId ? String(result.orderId) : undefined, executionPrice: result.executionPrice ? String(result.executionPrice) : undefined, quantity: result.quantity ? String(result.quantity) : undefined, errorMessage: result.error, executedAt: new Date() });
-          const openPositions = await getOpenPositions(client.id);
+          const result = await executeRotationExit({
+            apiKey: client.sfoxApiKey,
+            pair: input.pair,
+            quantity,
+            clientOrderId: generateClientOrderId("MANUAL-EXIT", input.pair),
+          });
+          const openPositions = await getOpenPositions(client.userId);
           const pos = openPositions.find((p) => p.pair.toUpperCase() === input.pair.toUpperCase());
+          let btcPnl = 0;
           if (result.success && result.executionPrice && pos) {
-            const pnl = ((result.executionPrice - Number(pos.entryPrice)) / Number(pos.entryPrice)) * 100;
-            await closePosition(pos.id, result.executionPrice, pnl);
+            const entryPrice = parseFloat(String(pos.entryPrice));
+            const entryBtcAmount = parseFloat(String(pos.entryBtcAmount));
+            btcPnl = entryBtcAmount * ((result.executionPrice - entryPrice) / entryPrice);
           }
-          clientResults.push({ clientId: client.id, clientName: client.clientName, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
+          const logId = await insertExecutionLog({
+            userId: client.userId,
+            pair: input.pair,
+            strategy: "ROTATION",
+            side: "sell",
+            quantity: String(result.quantity ?? "0"),
+            price: String(result.executionPrice ?? "0"),
+            sfoxOrderId: result.orderId ? String(result.orderId) : null,
+            status: result.success ? "filled" : "failed",
+            btcPnl: btcPnl !== 0 ? String(btcPnl.toFixed(8)) : null,
+            notes: result.error ?? null,
+          });
+          if (result.success && pos) {
+            await closePosition(pos.id, logId);
+          }
+          clientResults.push({ userId: client.userId, name: client.name, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
         }
         return { clientResults };
       }),
 
     /**
      * Capital exit — sell only the original BTC risked, leave profits running.
-     * Fires across ALL active clients.
      */
     executeCapitalExit: protectedProcedure
       .input(
@@ -640,80 +578,95 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
         const allClients = await getAllClients();
-        const clients = allClients.filter((c) => c.isActive);
+        const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
         const clientResults = [];
         for (const client of clients) {
-          if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: false, error: "No API key" });
-            continue;
-          }
-          const apiKey = decryptApiKey(client.sfoxApiKeyEncrypted, client.sfoxApiKeyIv, client.sfoxApiKeyAuthTag);
-          const executionId = nanoid();
-          await insertExecutionLog({ executionId, clientId: client.id, tradeType: "ROTATION_EXIT", pair: input.pair, side: "sell", positionSizePercent: "capital_only", status: "pending", isTestAccount: false, executedBy: ctx.user?.id });
-          const result = await executeCapitalExit({ apiKey, pair: input.pair, entryBtcCost: input.entryBtcCost, currentPrice: input.currentPrice, clientOrderId: generateClientOrderId("CAP-EXIT", input.pair) });
-          await updateExecutionLog(executionId, { status: result.success ? "executed" : "failed", sfoxOrderId: result.orderId ? String(result.orderId) : undefined, executionPrice: result.executionPrice ? String(result.executionPrice) : undefined, quantity: result.quantity ? String(result.quantity) : undefined, errorMessage: result.error, executedAt: new Date() });
-          clientResults.push({ clientId: client.id, clientName: client.clientName, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
+          const result = await executeCapitalExit({
+            apiKey: client.sfoxApiKey,
+            pair: input.pair,
+            entryBtcCost: input.entryBtcCost,
+            currentPrice: input.currentPrice,
+            clientOrderId: generateClientOrderId("CAP-EXIT", input.pair),
+          });
+          await insertExecutionLog({
+            userId: client.userId,
+            pair: input.pair,
+            strategy: "ROTATION",
+            side: "sell",
+            quantity: String(result.quantity ?? "0"),
+            price: String(result.executionPrice ?? "0"),
+            sfoxOrderId: result.orderId ? String(result.orderId) : null,
+            status: result.success ? "filled" : "failed",
+            notes: result.success ? "Capital exit — profits left running" : (result.error ?? null),
+          });
+          clientResults.push({ userId: client.userId, name: client.name, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
         }
         return { clientResults };
       }),
 
     /**
      * Emergency exit — Market order, immediate fill regardless of price.
-     * Fires for ALL active clients.
      */
     executeEmergencyExit: protectedProcedure
       .input(z.object({ pair: z.string() }))
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
         const allClients = await getAllClients();
-        const clients = allClients.filter((c) => c.isActive);
+        const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
         const clientResults = [];
         const altCurrency = input.pair.split("/")[0] ?? "";
         for (const client of clients) {
-          if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: false, error: "No API key" });
-            continue;
-          }
-          const apiKey = decryptApiKey(client.sfoxApiKeyEncrypted, client.sfoxApiKeyIv, client.sfoxApiKeyAuthTag);
-          const altBal = await getBalance(altCurrency, apiKey);
+          const altBal = await getBalance(altCurrency, client.sfoxApiKey);
           const quantity = altBal?.available ?? 0;
           if (quantity <= 0) {
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: false, error: `No ${altCurrency} balance` });
+            clientResults.push({ userId: client.userId, name: client.name, success: false, error: `No ${altCurrency} balance` });
             continue;
           }
-          const executionId = nanoid();
-          await insertExecutionLog({ executionId, clientId: client.id, tradeType: "ROTATION_EXIT", pair: input.pair, side: "sell", positionSizePercent: "100", status: "pending", isTestAccount: false, executedBy: ctx.user?.id });
-          const result = await executeEmergencyExit({ apiKey, pair: input.pair, quantity, clientOrderId: generateClientOrderId("EMRG-EXIT", input.pair) });
-          await updateExecutionLog(executionId, { status: result.success ? "executed" : "failed", sfoxOrderId: result.orderId ? String(result.orderId) : undefined, executionPrice: result.executionPrice ? String(result.executionPrice) : undefined, quantity: result.quantity ? String(result.quantity) : undefined, errorMessage: result.error, executedAt: new Date() });
-          clientResults.push({ clientId: client.id, clientName: client.clientName, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
+          const result = await executeEmergencyExit({
+            apiKey: client.sfoxApiKey,
+            pair: input.pair,
+            quantity,
+            clientOrderId: generateClientOrderId("EMRG-EXIT", input.pair),
+          });
+          await insertExecutionLog({
+            userId: client.userId,
+            pair: input.pair,
+            strategy: "ROTATION",
+            side: "sell",
+            quantity: String(result.quantity ?? "0"),
+            price: String(result.executionPrice ?? "0"),
+            sfoxOrderId: result.orderId ? String(result.orderId) : null,
+            status: result.success ? "filled" : "failed",
+            notes: result.success ? "EMERGENCY EXIT — Market order" : (result.error ?? null),
+          });
+          clientResults.push({ userId: client.userId, name: client.name, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
         }
         return { clientResults };
       }),
 
     /**
      * Emergency liquidation — sell ALL assets → USD for a specific client.
-     * Client offboarding only. Requires double confirmation before calling.
+     * Client offboarding only. Requires typed confirmation.
      */
     executeEmergencyLiquidation: protectedProcedure
       .input(
         z.object({
-          clientId: z.number(),
+          userId: z.number(),
           confirmationString: z.string(),
         })
       )
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
-        const client = await getClientById(input.clientId);
+        const client = await getClientByUserId(input.userId);
         if (!client) throw new TRPCError({ code: "NOT_FOUND", message: "Client not found" });
-        const expectedConfirmation = `LIQUIDATE ${client.clientName.toUpperCase()}`;
+        const expectedConfirmation = `LIQUIDATE ${(client.name ?? "CLIENT").toUpperCase()}`;
         if (input.confirmationString !== expectedConfirmation) {
           throw new TRPCError({ code: "BAD_REQUEST", message: `Type exactly: ${expectedConfirmation}` });
         }
-        if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
+        if (!client.sfoxApiKey) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "No SFOX API key configured" });
         }
-        const apiKey = decryptApiKey(client.sfoxApiKeyEncrypted, client.sfoxApiKeyIv, client.sfoxApiKeyAuthTag);
-        const result = await executeEmergencyLiquidation({ apiKey, clientName: client.clientName });
+        const result = await executeEmergencyLiquidation({ apiKey: client.sfoxApiKey, clientName: client.name ?? "CLIENT" });
         return { success: result.success, orders: result.orders.length, errors: result.errors };
       }),
 
@@ -731,20 +684,31 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
         const allClients = await getAllClients();
-        const clients = allClients.filter((c) => c.isActive);
+        const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
         const clientResults = [];
         const altCurrency = input.pair.split("/")[0] ?? "";
         for (const client of clients) {
-          if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) continue;
-          const apiKey = decryptApiKey(client.sfoxApiKeyEncrypted, client.sfoxApiKeyIv, client.sfoxApiKeyAuthTag);
-          const altBal = await getBalance(altCurrency, apiKey);
+          const altBal = await getBalance(altCurrency, client.sfoxApiKey);
           const quantity = altBal?.available ?? 0;
           if (quantity <= 0) continue;
           try {
-            const order = await placeTrailingStop({ pair: input.pair, quantity, apiKey, stopPercent: input.stopPercent, clientOrderId: generateClientOrderId("TRAIL", input.pair) });
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: true, orderId: order.id });
+            const order = await placeTrailingStop({
+              pair: input.pair,
+              quantity,
+              apiKey: client.sfoxApiKey,
+              stopPercent: input.stopPercent,
+              clientOrderId: generateClientOrderId("TRAIL", input.pair),
+            });
+            // Update position record with trailing stop
+            const openPositions = await getOpenPositions(client.userId);
+            const pos = openPositions.find((p) => p.pair.toUpperCase() === input.pair.toUpperCase());
+            if (pos) {
+              const currentPrice = parseFloat(String(pos.currentPrice ?? pos.entryPrice));
+              await setTrailingStop(pos.id, input.stopPercent, currentPrice * (1 - input.stopPercent));
+            }
+            clientResults.push({ userId: client.userId, name: client.name, success: true, orderId: order.id });
           } catch (err) {
-            clientResults.push({ clientId: client.id, clientName: client.clientName, success: false, error: err instanceof Error ? err.message : String(err) });
+            clientResults.push({ userId: client.userId, name: client.name, success: false, error: err instanceof Error ? err.message : String(err) });
           }
         }
         return { clientResults };
@@ -752,7 +716,6 @@ export const appRouter = router({
 
     /**
      * Get volatility tier recommendation for a trailing stop.
-     * Returns suggested stop percent based on 30d price history.
      */
     getTrailingStopRecommendation: protectedProcedure
       .input(z.object({ dailyPrices: z.array(z.number()).min(2) }))
@@ -767,11 +730,11 @@ export const appRouter = router({
       .input(
         z.object({
           limit: z.number().min(1).max(500).default(100),
-          clientId: z.number().optional(),
+          userId: z.number().optional(),
         }).optional()
       )
       .query(async ({ input }) => {
-        return getExecutionLog(input?.limit ?? 100, input?.clientId);
+        return getExecutionLog(input?.limit ?? 100, input?.userId);
       }),
   }),
 });

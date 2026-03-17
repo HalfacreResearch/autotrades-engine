@@ -15,7 +15,7 @@
  *
  * Hard limits (server-side enforced):
  *   - Single trade: max 6% of BTC balance
- *   - Total per altcoin: max 12% of BTC balance
+ *   - Total per altcoin: max 12% of BTC balance (3 entries max)
  *   - Max 3 concurrent rotation positions
  *
  * Execution:
@@ -25,11 +25,16 @@
  *   - Fires for ALL active clients simultaneously
  */
 
-import { getAllClients, getOpenPositions, insertExecutionLog, insertPosition, updateExecutionLog } from "./db";
+import {
+  getAllClients,
+  getOpenPositions,
+  insertExecutionLog,
+  insertPosition,
+  setTrailingStop,
+} from "./db";
 import {
   calculateBreakevenBtc,
   calculateVolatilityTier,
-  decryptApiKey,
   executeRotationEntry,
   generateClientOrderId,
   getBalance,
@@ -52,8 +57,8 @@ export interface RotationEntryResult {
   positionSizePercent: number;
   isDCAAddIn: boolean;
   clientResults: Array<{
-    clientId: number;
-    clientName: string;
+    userId: number;
+    name: string | null;
     success: boolean;
     orderId?: number;
     btcAmount?: number;
@@ -68,7 +73,7 @@ export interface TrailingStopCheckResult {
   trailingStopsSet: number;
   results: Array<{
     positionId: number;
-    clientId: number;
+    userId: number;
     pair: string;
     netProfitable: boolean;
     trailingStopSet: boolean;
@@ -81,16 +86,16 @@ export interface TrailingStopCheckResult {
  * Determine rotation entry size based on existing exposure to this altcoin.
  * Returns 0 if max exposure already reached.
  */
-export function determineEntrySize(currentExposurePercent: number): {
+export function determineEntrySize(openPairPositionCount: number): {
   positionSizePercent: number;
   isDCAAddIn: boolean;
   label: string;
 } {
-  if (currentExposurePercent === 0) {
+  if (openPairPositionCount === 0) {
     return { positionSizePercent: 2, isDCAAddIn: false, label: "Initial entry (2%)" };
-  } else if (currentExposurePercent <= 2) {
+  } else if (openPairPositionCount === 1) {
     return { positionSizePercent: 4, isDCAAddIn: true, label: "DCA add-in (4%)" };
-  } else if (currentExposurePercent <= 6) {
+  } else if (openPairPositionCount === 2) {
     return { positionSizePercent: 6, isDCAAddIn: true, label: "Final DCA (6%)" };
   } else {
     return { positionSizePercent: 0, isDCAAddIn: true, label: "Max exposure reached (12%)" };
@@ -120,57 +125,26 @@ export async function runRotationEntry(
   }
 
   const allClients = await getAllClients();
-  const clients = allClients.filter((c) => c.isActive);
+  const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
   const clientResults: RotationEntryResult["clientResults"] = [];
 
   let finalSizePercent = forceSizePercent ?? 2;
   let isDCAAddIn = false;
 
   for (const client of clients) {
-    if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-      clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
-        success: false,
-        error: "No SFOX API key configured",
-      });
-      continue;
-    }
-
-    let apiKey: string;
-    try {
-      apiKey = decryptApiKey(
-        client.sfoxApiKeyEncrypted,
-        client.sfoxApiKeyIv,
-        client.sfoxApiKeyAuthTag
-      );
-    } catch (err) {
-      clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
-        success: false,
-        error: `Failed to decrypt API key: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      continue;
-    }
-
     // Calculate current exposure to this altcoin for this client
-    const openPositions = await getOpenPositions(client.id);
+    const openPositions = await getOpenPositions(client.userId);
     const existingAltPositions = openPositions.filter(
       (p) => p.pair.toUpperCase() === signal.pair.toUpperCase()
-    );
-    const currentExposurePercent = existingAltPositions.reduce(
-      (sum, p) => sum + Number(p.sizePercent),
-      0
     );
 
     // Determine entry size if not forced
     if (!forceSizePercent) {
-      const sizing = determineEntrySize(currentExposurePercent);
+      const sizing = determineEntrySize(existingAltPositions.length);
       if (sizing.positionSizePercent === 0) {
         clientResults.push({
-          clientId: client.id,
-          clientName: client.clientName,
+          userId: client.userId,
+          name: client.name,
           success: false,
           error: `Max exposure (12%) already reached for ${signal.pair}`,
         });
@@ -183,93 +157,70 @@ export async function runRotationEntry(
     // Hard limit checks
     if (finalSizePercent > 6) {
       clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
+        userId: client.userId,
+        name: client.name,
         success: false,
         error: `Entry size ${finalSizePercent}% exceeds hard limit of 6% per trade`,
       });
       continue;
     }
 
-    const newTotalExposure = currentExposurePercent + finalSizePercent;
-    if (newTotalExposure > 12) {
-      clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
-        success: false,
-        error: `This trade would bring total ${signal.altSymbol} exposure to ${newTotalExposure}% (max 12%)`,
-      });
-      continue;
-    }
-
     // Max 3 concurrent rotations
     const totalOpenPositions = openPositions.filter((p) => p.status === "open").length;
-    if (totalOpenPositions >= 3 && currentExposurePercent === 0) {
+    if (totalOpenPositions >= 3 && existingAltPositions.length === 0) {
       clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
+        userId: client.userId,
+        name: client.name,
         success: false,
         error: `Maximum 3 concurrent rotations reached (currently ${totalOpenPositions})`,
       });
       continue;
     }
 
-    const executionId = `rot-entry-${client.id}-${Date.now()}`;
-
-    await insertExecutionLog({
-      executionId,
-      clientId: client.id,
-      tradeType: "ROTATION_ENTRY",
-      pair: signal.pair,
-      side: "buy",
-      positionSizePercent: String(finalSizePercent),
-      status: "pending",
-      isTestAccount: false,
-    });
-
     if (dryRun) {
       clientResults.push({
-        clientId: client.id,
-        clientName: client.clientName,
+        userId: client.userId,
+        name: client.name,
         success: true,
-      });
-      await updateExecutionLog(executionId, {
-        status: "cancelled",
-        errorMessage: "Dry run — no order placed",
       });
       continue;
     }
 
     const result = await executeRotationEntry({
-      apiKey,
+      apiKey: client.sfoxApiKey,
       pair: signal.pair,
       positionSizePercent: finalSizePercent,
       clientOrderId: generateClientOrderId("ROT-ENTRY", signal.pair),
     });
 
-    await updateExecutionLog(executionId, {
-      status: result.success ? "executed" : "failed",
-      sfoxOrderId: result.orderId ? String(result.orderId) : undefined,
-      executionPrice: result.executionPrice ? String(result.executionPrice) : undefined,
-      quantity: result.quantity ? String(result.quantity) : undefined,
-      errorMessage: result.error,
-      executedAt: new Date(),
+    const logId = await insertExecutionLog({
+      userId: client.userId,
+      pair: signal.pair,
+      strategy: "ROTATION",
+      side: "buy",
+      quantity: String(result.quantity ?? "0"),
+      price: String(result.executionPrice ?? "0"),
+      sfoxOrderId: result.orderId ? String(result.orderId) : null,
+      status: result.success ? "filled" : "failed",
+      notes: result.error ?? null,
     });
 
     // Record open position
     if (result.success && result.executionPrice && result.quantity) {
       await insertPosition({
-        clientId: client.id,
+        userId: client.userId,
         pair: signal.pair,
-        sizePercent: String(finalSizePercent),
+        strategy: "ROTATION",
+        entryExecutionId: logId,
         entryPrice: String(result.executionPrice),
-        openExecutionId: executionId,
+        entryBtcAmount: String(result.quantity),
+        status: "open",
       });
     }
 
     clientResults.push({
-      clientId: client.id,
-      clientName: client.clientName,
+      userId: client.userId,
+      name: client.name,
       success: result.success,
       orderId: result.orderId,
       btcAmount: result.btcValue,
@@ -297,28 +248,16 @@ export async function checkAndSetTrailingStops(
   altPriceHistory: Map<string, number[]>
 ): Promise<TrailingStopCheckResult> {
   const allClients = await getAllClients();
-  const activeClients = allClients.filter((c) => c.isActive);
+  const activeClients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
   const results: TrailingStopCheckResult["results"] = [];
   let trailingStopsSet = 0;
   let positionsChecked = 0;
 
   for (const client of activeClients) {
-    if (!client.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) continue;
-
-    let apiKey: string;
-    try {
-      apiKey = decryptApiKey(
-        client.sfoxApiKeyEncrypted,
-        client.sfoxApiKeyIv,
-        client.sfoxApiKeyAuthTag
-      );
-    } catch {
-      continue;
-    }
-
-    const openPositions = await getOpenPositions(client.id);
+    const openPositions = await getOpenPositions(client.userId);
+    // Only check positions that don't already have a trailing stop set
     const openRotations = openPositions.filter(
-      (p) => p.status === "open" && !p.trailingStopTriggered
+      (p) => p.status === "open" && !p.trailingStopPrice
     );
 
     for (const position of openRotations) {
@@ -329,13 +268,13 @@ export async function checkAndSetTrailingStops(
       let currentAltBalance = 0;
       let currentPrice = 0;
       try {
-        const altBal = await getBalance(altSymbol, apiKey);
+        const altBal = await getBalance(altSymbol, client.sfoxApiKey);
         currentAltBalance = altBal?.available ?? 0;
         currentPrice = Number(position.currentPrice ?? position.entryPrice);
       } catch (err) {
         results.push({
           positionId: position.id,
-          clientId: client.id,
+          userId: client.userId,
           pair: position.pair,
           netProfitable: false,
           trailingStopSet: false,
@@ -344,31 +283,23 @@ export async function checkAndSetTrailingStops(
         continue;
       }
 
-      // Calculate entry BTC cost
-      const entryBtcCost =
-        Number(position.sizePercent) > 0
-          ? currentAltBalance * Number(position.entryPrice) // approximate
-          : 0;
-
+      // Calculate entry BTC cost from stored entryBtcAmount
+      const entryBtcCost = Number(position.entryBtcAmount);
       const currentBtcValue = currentAltBalance * currentPrice;
       const netProfitable = isNetProfitable(entryBtcCost, currentBtcValue);
 
-      // Skip if trailing stop already set (check SFOX open orders)
-      // For now, use the DB flag trailingStopPercent as indicator
-      const alreadyHasStop = Number(position.trailingStopPercent) > 0 && position.trailingStopTriggered === false;
-
-      if (!netProfitable || alreadyHasStop) {
+      if (!netProfitable) {
         results.push({
           positionId: position.id,
-          clientId: client.id,
+          userId: client.userId,
           pair: position.pair,
-          netProfitable,
+          netProfitable: false,
           trailingStopSet: false,
         });
         continue;
       }
 
-      // Calculate volatility tier
+      // Calculate volatility tier for trailing stop %
       const priceHistory = altPriceHistory.get(altSymbol) ?? [];
       const volatilityRec = calculateVolatilityTier(priceHistory);
 
@@ -378,15 +309,19 @@ export async function checkAndSetTrailingStops(
           await placeTrailingStop({
             pair: position.pair,
             quantity: currentAltBalance,
-            apiKey,
+            apiKey: client.sfoxApiKey,
             stopPercent: volatilityRec.stopPercent,
             clientOrderId: generateClientOrderId("TRAIL", position.pair),
           });
 
+          // Update position record with trailing stop details
+          const trailingStopPrice = currentPrice * (1 - volatilityRec.stopPercent);
+          await setTrailingStop(position.id, volatilityRec.stopPercent, trailingStopPrice);
+
           trailingStopsSet++;
           results.push({
             positionId: position.id,
-            clientId: client.id,
+            userId: client.userId,
             pair: position.pair,
             netProfitable: true,
             trailingStopSet: true,
@@ -396,7 +331,7 @@ export async function checkAndSetTrailingStops(
       } catch (err) {
         results.push({
           positionId: position.id,
-          clientId: client.id,
+          userId: client.userId,
           pair: position.pair,
           netProfitable: true,
           trailingStopSet: false,

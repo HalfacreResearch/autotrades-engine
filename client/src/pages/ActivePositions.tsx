@@ -20,15 +20,15 @@ type ExitType = "full" | "capital" | "emergency";
 
 interface Position {
   id: number;
-  clientId: number;
+  userId: number;
   pair: string;
   entryPrice: string;
+  entryBtcAmount: string;
   currentPrice?: string | null;
-  sizePercent: string;
-  unrealizedPnlPercent?: string | null;
-  peakPnlPercent?: string | null;
-  trailingStopPercent?: string | null;
-  trailingStopTriggered?: boolean | null;
+  unrealizedBtcPnl?: string | null;
+  peakPrice?: string | null;
+  trailingStopPct?: string | null;
+  trailingStopPrice?: string | null;
   openedAt: string | Date;
 }
 
@@ -48,7 +48,7 @@ function ExitDialog({ position, onClose, onSuccess }: ExitDialogProps) {
   const emergencyExit = trpc.trading.executeEmergencyExit.useMutation();
 
   const isLoading = manualExit.isPending || capitalExit.isPending || emergencyExit.isPending;
-  const pnl = parseFloat(String(position.unrealizedPnlPercent ?? "0"));
+  const pnl = parseFloat(String(position.unrealizedBtcPnl ?? "0"));
   const entryPrice = parseFloat(String(position.entryPrice));
 
   async function handleExit() {
@@ -96,7 +96,7 @@ function ExitDialog({ position, onClose, onSuccess }: ExitDialogProps) {
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Position Size</span>
-              <span>{position.sizePercent}% of BTC balance</span>
+              <span>{parseFloat(String(position.entryBtcAmount)).toFixed(4)} BTC risked</span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Unrealized P&L</span>
@@ -220,8 +220,8 @@ export default function ActivePositions() {
   const [trailPair, setTrailPair] = useState<string | null>(null);
 
   const openCount = positions?.length ?? 0;
-  const profitableCount = positions?.filter((p) => parseFloat(String(p.unrealizedPnlPercent ?? "0")) > 0).length ?? 0;
-  const trailingStopCount = positions?.filter((p) => p.trailingStopTriggered).length ?? 0;
+  const profitableCount = positions?.filter((p) => parseFloat(String(p.unrealizedBtcPnl ?? "0")) > 0).length ?? 0;
+  const trailingStopCount = positions?.filter((p) => p.trailingStopPrice).length ?? 0;
   const activePairs = Array.from(new Set(positions?.map((p) => p.pair) ?? []));
 
   return (
@@ -267,9 +267,9 @@ export default function ActivePositions() {
       ) : (
         <div className="space-y-3">
           {positions.map((pos) => {
-            const pnl = parseFloat(String(pos.unrealizedPnlPercent ?? "0"));
-            const peak = parseFloat(String(pos.peakPnlPercent ?? "0"));
-            const trailStop = parseFloat(String(pos.trailingStopPercent ?? "0"));
+            const pnl = parseFloat(String(pos.unrealizedBtcPnl ?? "0"));
+            const peak = parseFloat(String(pos.peakPrice ?? "0"));
+            const trailStop = parseFloat(String(pos.trailingStopPct ?? "0"));
             const entryPrice = parseFloat(String(pos.entryPrice));
             const currentPrice = parseFloat(String(pos.currentPrice ?? "0"));
             const hasTrailingStop = trailStop > 0;
@@ -277,7 +277,7 @@ export default function ActivePositions() {
             return (
               <Card
                 key={pos.id}
-                className={pos.trailingStopTriggered ? "border-red-500/50" : ""}
+                className={pos.trailingStopPrice ? "border-red-500/50" : ""}
               >
                 <CardContent className="py-4 px-5">
                   <div className="flex items-start justify-between gap-4">
@@ -285,13 +285,13 @@ export default function ActivePositions() {
                       {/* Header row */}
                       <div className="flex items-center gap-3 mb-3">
                         <span className="font-semibold text-lg">{pos.pair}</span>
-                        <Badge variant="outline" className="text-xs">{pos.sizePercent}% of BTC</Badge>
-                        {pos.trailingStopTriggered && (
+                        <Badge variant="outline" className="text-xs">{parseFloat(String(pos.entryBtcAmount)).toFixed(4)} BTC</Badge>
+                        {pos.trailingStopPrice && (
                           <Badge variant="destructive" className="text-xs gap-1">
                             <AlertTriangle className="w-3 h-3" />Trailing Stop Hit
                           </Badge>
                         )}
-                        {hasTrailingStop && !pos.trailingStopTriggered && (
+                        {hasTrailingStop && !pos.trailingStopPrice && (
                           <Badge variant="secondary" className="text-xs gap-1">
                             <Shield className="w-3 h-3" />{(trailStop * 100).toFixed(0)}% trail
                           </Badge>
@@ -342,11 +342,11 @@ export default function ActivePositions() {
                       )}
                       <Button
                         size="sm"
-                        variant={pos.trailingStopTriggered ? "destructive" : "default"}
-                        onClick={() => setExitPosition(pos as Position)}
+                        variant={pos.trailingStopPrice ? "destructive" : "default"}
+                        onClick={() => setExitPosition(pos as unknown as Position)}
                         className="text-xs"
                       >
-                        {pos.trailingStopTriggered ? "Exit Now" : "Close"}
+                        {pos.trailingStopPrice ? "Exit Now" : "Close"}
                       </Button>
                       {!hasTrailingStop && pnl > 0 && (
                         <Button
@@ -358,11 +358,11 @@ export default function ActivePositions() {
                           <Shield className="w-3 h-3" />Trail
                         </Button>
                       )}
-                      {pos.trailingStopTriggered && (
+                      {pos.trailingStopPrice && (
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => setExitPosition({ ...pos as Position })}
+                          onClick={() => setExitPosition({ ...pos as unknown as Position })}
                           className="text-xs gap-1 border-orange-500/50 text-orange-500"
                         >
                           <Zap className="w-3 h-3" />Emergency

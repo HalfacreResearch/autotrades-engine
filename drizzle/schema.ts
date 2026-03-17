@@ -1,5 +1,14 @@
+/**
+ * Drizzle schema — mirrors the actual VPS codex_portal MySQL tables exactly.
+ * These type definitions are used for type safety only.
+ * The tables already exist on the VPS — do NOT run migrations against them.
+ *
+ * All DB operations use CLIENT_PORTAL_DATABASE_URL (codex_portal on VPS).
+ * Signal/prediction reads use TRADINGHQ_DATABASE_URL (tradinghq on VPS).
+ * There is NO Manus-hosted database.
+ */
+
 import {
-  bigint,
   boolean,
   decimal,
   index,
@@ -11,9 +20,9 @@ import {
   varchar,
 } from "drizzle-orm/mysql-core";
 
-/**
- * Core user table backing auth flow.
- */
+// ─── users ────────────────────────────────────────────────────────────────────
+// Mirrors codex_portal.users exactly
+
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
   openId: varchar("openId", { length: 64 }).notNull().unique(),
@@ -29,140 +38,107 @@ export const users = mysqlTable("users", {
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 
-/**
- * Client connections — stores encrypted SFOX API credentials per client.
- * API keys are encrypted server-side and NEVER returned to the frontend.
- */
-export const clientConnections = mysqlTable("client_connections", {
+// ─── client_credentials ───────────────────────────────────────────────────────
+// Mirrors codex_portal.client_credentials exactly
+// Stores SFOX API keys per user. Keys are stored as-is (managed by client portal).
+
+export const clientCredentials = mysqlTable("client_credentials", {
   id: int("id").autoincrement().primaryKey(),
-  /** Client name for display */
-  clientName: varchar("client_name", { length: 255 }).notNull(),
-  /** Client email for identification */
-  clientEmail: varchar("client_email", { length: 320 }).notNull().unique(),
-  /** Encrypted SFOX API key (AES-256-GCM) */
-  sfoxApiKeyEncrypted: text("sfox_api_key_encrypted"),
-  /** IV for decryption */
-  sfoxApiKeyIv: varchar("sfox_api_key_iv", { length: 64 }),
-  /** Auth tag for AES-GCM */
-  sfoxApiKeyAuthTag: varchar("sfox_api_key_auth_tag", { length: 64 }),
-  /** Whether this client is active for trading */
-  isActive: boolean("is_active").default(true).notNull(),
-  /** Last time SFOX connection was verified */
-  lastVerifiedAt: timestamp("last_verified_at"),
-  /** SFOX connection status */
-  connectionStatus: mysqlEnum("connection_status", ["connected", "error", "pending", "unconfigured"])
-    .default("unconfigured")
-    .notNull(),
+  userId: int("userId").notNull(),
+  sfoxApiKey: text("sfoxApiKey").notNull(),
   /**
-   * Whether the initial 25% USD-to-BTC buy has been executed for this client.
-   * Defaults to TRUE for all existing clients (set via migration) to prevent
-   * accidentally re-firing the initial buy on clients who are already onboarded.
-   * Only set to FALSE for genuinely new clients who have not yet had their first trade.
+   * Whether the initial 25% USD-to-BTC buy has been executed.
+   * Defaults TRUE for all existing clients — NEVER fires automatically.
+   * Set to FALSE only for brand-new clients who need their first trade.
+   * The 25% initial buy is ALWAYS manual — never automated.
    */
   initialBuyExecuted: boolean("initial_buy_executed").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
+export type ClientCredential = typeof clientCredentials.$inferSelect;
+export type InsertClientCredential = typeof clientCredentials.$inferInsert;
+
+// ─── client_connections ───────────────────────────────────────────────────────
+// Mirrors codex_portal.client_connections exactly
+// Join table linking users to their credentials with trading settings.
+
+export const clientConnections = mysqlTable("client_connections", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("user_id").notNull(),
+  credentialId: int("credential_id").notNull(),
+  isActive: boolean("is_active").default(true),
+  autoTradeEnabled: boolean("auto_trade_enabled").default(false),
+  maxBtcPerTrade: decimal("max_btc_per_trade", { precision: 20, scale: 8 }),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+});
+
 export type ClientConnection = typeof clientConnections.$inferSelect;
 export type InsertClientConnection = typeof clientConnections.$inferInsert;
 
-/**
- * Trade execution log — every trade executed through this system.
- */
+// ─── execution_log ────────────────────────────────────────────────────────────
+// Mirrors codex_portal.execution_log exactly
+
 export const executionLog = mysqlTable(
   "execution_log",
   {
-    id: bigint("id", { mode: "number" }).autoincrement().primaryKey(),
-    /** UUID for this execution */
-    executionId: varchar("execution_id", { length: 36 }).notNull().unique(),
-    /** Client who this trade was executed for */
-    clientId: int("client_id")
-      .notNull()
-      .references(() => clientConnections.id),
-    /** Reference to tradinghq recommendation_id */
-    recommendationId: varchar("recommendation_id", { length: 36 }),
-    /** Type of trade */
-    tradeType: mysqlEnum("trade_type", ["DCA_BUY", "ROTATION_ENTRY", "ROTATION_EXIT"]).notNull(),
-    /** Trading pair e.g. BTC/USD, ETH/BTC */
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("user_id").notNull(),
+    recommendationId: int("recommendation_id"),
     pair: varchar("pair", { length: 20 }).notNull(),
-    /** Buy or sell */
+    strategy: mysqlEnum("strategy", ["DCA", "ROTATION"]).notNull(),
     side: mysqlEnum("side", ["buy", "sell"]).notNull(),
-    /** Position size as % of relevant balance */
-    positionSizePercent: decimal("position_size_percent", { precision: 5, scale: 2 }).notNull(),
-    /** Quantity of base asset */
-    quantity: decimal("quantity", { precision: 20, scale: 8 }),
-    /** Price at execution */
-    executionPrice: decimal("execution_price", { precision: 20, scale: 8 }),
-    /** Total USD value of trade */
-    usdValue: decimal("usd_value", { precision: 20, scale: 2 }),
-    /** SFOX order ID */
-    sfoxOrderId: varchar("sfox_order_id", { length: 64 }),
-    /** Execution status */
-    status: mysqlEnum("status", ["pending", "executed", "failed", "cancelled"]).notNull().default("pending"),
-    /** Whether this was a test account trade */
-    isTestAccount: boolean("is_test_account").default(true).notNull(),
-    /** Error message if failed */
-    errorMessage: text("error_message"),
-    /** Realized P&L in BTC terms (for rotation exits) */
-    realizedPnlBtc: decimal("realized_pnl_btc", { precision: 20, scale: 8 }),
-    /** Realized P&L percentage */
-    realizedPnlPercent: decimal("realized_pnl_percent", { precision: 10, scale: 4 }),
-    /** Entry price (for rotation exits, to calculate P&L) */
-    entryPrice: decimal("entry_price", { precision: 20, scale: 8 }),
-    /** Who triggered this execution */
-    executedBy: int("executed_by").references(() => users.id),
-    createdAt: timestamp("createdAt").defaultNow().notNull(),
-    executedAt: timestamp("executed_at"),
+    quantity: decimal("quantity", { precision: 20, scale: 8 }).notNull(),
+    price: decimal("price", { precision: 20, scale: 8 }).notNull(),
+    totalUsd: decimal("total_usd", { precision: 20, scale: 2 }),
+    totalBtc: decimal("total_btc", { precision: 20, scale: 8 }),
+    feeUsd: decimal("fee_usd", { precision: 20, scale: 8 }),
+    codexFeeUsd: decimal("codex_fee_usd", { precision: 20, scale: 8 }),
+    sfoxOrderId: varchar("sfox_order_id", { length: 100 }),
+    status: mysqlEnum("status", ["pending", "filled", "partial", "failed", "cancelled"])
+      .notNull()
+      .default("pending"),
+    btcPnl: decimal("btc_pnl", { precision: 20, scale: 8 }),
+    notes: text("notes"),
+    executedAt: timestamp("executed_at").defaultNow().notNull(),
   },
   (table) => ({
-    clientIdx: index("idx_exec_client").on(table.clientId),
+    userIdx: index("idx_exec_user").on(table.userId),
     statusIdx: index("idx_exec_status").on(table.status),
-    typeIdx: index("idx_exec_type").on(table.tradeType),
-    createdIdx: index("idx_exec_created").on(table.createdAt),
   })
 );
 
-export type ExecutionLog = typeof executionLog.$inferSelect;
+export type ExecutionLogEntry = typeof executionLog.$inferSelect;
 export type InsertExecutionLog = typeof executionLog.$inferInsert;
 
-/**
- * Active rotation positions tracked per client.
- */
+// ─── autotrades_active_positions ─────────────────────────────────────────────
+// Mirrors codex_portal.autotrades_active_positions exactly
+
 export const activePositions = mysqlTable(
-  "active_positions",
+  "autotrades_active_positions",
   {
-    id: bigint("id", { mode: "number" }).autoincrement().primaryKey(),
-    clientId: int("client_id")
-      .notNull()
-      .references(() => clientConnections.id),
-    /** Trading pair e.g. ETH/BTC */
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("user_id").notNull(),
     pair: varchar("pair", { length: 20 }).notNull(),
-    /** Position size as % of BTC stack */
-    sizePercent: decimal("size_percent", { precision: 5, scale: 2 }).notNull(),
-    /** Entry price */
+    strategy: mysqlEnum("strategy", ["DCA", "ROTATION"]).notNull(),
+    entryExecutionId: int("entry_execution_id"),
     entryPrice: decimal("entry_price", { precision: 20, scale: 8 }).notNull(),
-    /** Current price (refreshed periodically) */
+    entryBtcAmount: decimal("entry_btc_amount", { precision: 20, scale: 8 }).notNull(),
     currentPrice: decimal("current_price", { precision: 20, scale: 8 }),
-    /** Unrealized P&L % */
-    unrealizedPnlPercent: decimal("unrealized_pnl_percent", { precision: 10, scale: 4 }),
-    /** Peak P&L % reached (for trailing stop) */
-    peakPnlPercent: decimal("peak_pnl_percent", { precision: 10, scale: 4 }),
-    /** Trailing stop threshold % (e.g. 5 = stop if drops 5% from peak) */
-    trailingStopPercent: decimal("trailing_stop_percent", { precision: 5, scale: 2 }).default("5.00"),
-    /** Whether trailing stop has been triggered */
-    trailingStopTriggered: boolean("trailing_stop_triggered").default(false).notNull(),
-    /** Reference execution log entry that opened this position */
-    openExecutionId: varchar("open_execution_id", { length: 36 }),
-    /** Status */
-    status: mysqlEnum("status", ["open", "closing", "closed"]).notNull().default("open"),
+    peakPrice: decimal("peak_price", { precision: 20, scale: 8 }),
+    trailingStopPct: decimal("trailing_stop_pct", { precision: 5, scale: 4 }).default("0.0500"),
+    trailingStopPrice: decimal("trailing_stop_price", { precision: 20, scale: 8 }),
+    unrealizedBtcPnl: decimal("unrealized_btc_pnl", { precision: 20, scale: 8 }),
+    status: mysqlEnum("status", ["open", "closed", "stopped_out"]).notNull().default("open"),
     openedAt: timestamp("opened_at").defaultNow().notNull(),
     closedAt: timestamp("closed_at"),
-    exitPrice: decimal("exit_price", { precision: 20, scale: 8 }),
-    realizedPnlPercent: decimal("realized_pnl_percent", { precision: 10, scale: 4 }),
+    closeExecutionId: int("close_execution_id"),
   },
   (table) => ({
-    clientIdx: index("idx_pos_client").on(table.clientId),
+    userIdx: index("idx_pos_user").on(table.userId),
     statusIdx: index("idx_pos_status").on(table.status),
     pairIdx: index("idx_pos_pair").on(table.pair),
   })

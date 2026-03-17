@@ -18,7 +18,7 @@ type TradeAction =
   | { type: "entry"; pair: string; sizePercent: 2 | 4 | 6 }
   | { type: "exit"; pair: string; exitType: "full" | "capital" | "emergency" }
   | { type: "trailing_stop"; pair: string; stopPercent: number }
-  | { type: "liquidation"; clientId: number; clientName: string };
+  | { type: "liquidation"; userId: number; clientName: string };
 
 // ─── SFOX-supported rotation pairs ───────────────────────────────────────────
 
@@ -175,7 +175,7 @@ export default function ManualTrading() {
     setIsExecuting(true);
 
     try {
-      let result: { clientResults?: Array<{ clientName: string; success: boolean; error?: string }> } | null = null;
+      let result: { clientResults?: Array<{ userId?: number; name?: string | null; success: boolean; error?: string }> } | null = null;
 
       if (pendingAction.type === "entry") {
         result = await manualEntry.mutateAsync({
@@ -201,8 +201,8 @@ export default function ManualTrading() {
         });
       } else if (pendingAction.type === "liquidation") {
         const liqResult = await emergencyLiquidation.mutateAsync({
-          clientId: pendingAction.clientId,
-          confirmationString: `LIQUIDATE ${pendingAction.clientName.toUpperCase()}`,
+          userId: (pendingAction as { type: "liquidation"; userId: number; clientName: string }).userId,
+          confirmationString: `LIQUIDATE ${(pendingAction as { type: "liquidation"; userId: number; clientName: string }).clientName.toUpperCase()}`,
         });
         if (liqResult.success) {
           toast.success(`Liquidation complete — ${liqResult.orders} orders placed for ${pendingAction.clientName}`);
@@ -473,8 +473,8 @@ export default function ManualTrading() {
                 </SelectTrigger>
                 <SelectContent>
                   {clients?.map((c) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {c.clientName}
+                    <SelectItem key={c.userId} value={String(c.userId)}>
+                      {c.name ?? `User #${c.userId}`}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -485,12 +485,12 @@ export default function ManualTrading() {
               className="w-full"
               disabled={!liquidationClientId}
               onClick={() => {
-                const client = clients?.find((c) => c.id === parseInt(liquidationClientId));
+                const client = clients?.find((c) => c.userId === parseInt(liquidationClientId));
                 if (client) {
                   setPendingAction({
                     type: "liquidation",
-                    clientId: client.id,
-                    clientName: client.clientName,
+                    userId: client.userId,
+                    clientName: client.name ?? `User #${client.userId}`,
                   });
                 }
               }}

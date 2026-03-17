@@ -91,8 +91,8 @@ export default function Dashboard() {
 
   const openPositionCount = positions?.length ?? 0;
   const activeClientCount = clients?.filter((c) => c.isActive && c.hasApiKey).length ?? 0;
-  const executedCount = log?.filter((l) => l.status === "executed").length ?? 0;
-  const trailingStopAlerts = positions?.filter((p) => p.trailingStopTriggered) ?? [];
+  const executedCount = log?.filter((l) => l.status === "filled").length ?? 0;
+  const trailingStopAlerts = positions?.filter((p) => p.trailingStopPrice) ?? [];
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
@@ -113,11 +113,11 @@ export default function Dashboard() {
       {pendingInitial && pendingInitial.length > 0 && (
         <div className="space-y-2">
           {pendingInitial.map((client) => (
-            <Alert key={client.id} className="border-blue-500/40 bg-blue-500/5">
+            <Alert key={client.userId} className="border-blue-500/40 bg-blue-500/5">
               <Clock className="h-4 w-4 text-blue-500" />
               <AlertDescription className="flex items-center justify-between">
                 <span className="text-sm">
-                  <strong>{client.clientName}</strong> — new client pending initial 25% BTC purchase
+                  <strong>{client.name ?? `User #${client.userId}`}</strong> — new client pending initial 25% BTC purchase
                 </span>
                 <Button
                   size="sm"
@@ -256,18 +256,18 @@ export default function Dashboard() {
           {!posLoading && positions && positions.length > 0 && (
             <div className="space-y-2">
               {positions.map((pos) => {
-                const pnl = parseFloat(String(pos.unrealizedPnlPercent ?? "0"));
+                const pnl = parseFloat(String(pos.unrealizedBtcPnl ?? "0"));
                 return (
                   <div key={pos.id} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
                     <div className="flex items-center gap-3">
                       <span className="font-mono text-sm font-medium">{pos.pair}</span>
-                      <span className="text-muted-foreground text-xs">{pos.sizePercent}% of BTC</span>
+                      <span className="text-muted-foreground text-xs">{parseFloat(String(pos.entryBtcAmount)).toFixed(4)} BTC</span>
                     </div>
                     <div className="flex items-center gap-3">
                       <span className={`font-medium text-xs ${pnlColor(pnl)}`}>
                         {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}%
                       </span>
-                      {pos.trailingStopTriggered && (
+                      {pos.trailingStopPrice && (
                         <Badge variant="destructive" className="text-xs">Stop Triggered</Badge>
                       )}
                     </div>
@@ -303,10 +303,10 @@ export default function Dashboard() {
                 <div key={entry.id} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
                   <div className="flex items-center gap-3">
                     {statusBadge(entry.status)}
-                    <span className="text-sm">{entry.tradeType.replace(/_/g, " ")}</span>
+                    <span className="text-sm">{entry.strategy}</span>
                     <span className="text-muted-foreground text-xs font-mono">{entry.pair}</span>
                   </div>
-                  <span className="text-muted-foreground text-xs">{timeAgo(entry.createdAt)}</span>
+                  <span className="text-muted-foreground text-xs">{timeAgo(entry.executedAt)}</span>
                 </div>
               ))}
             </div>
