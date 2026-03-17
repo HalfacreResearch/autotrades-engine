@@ -5,8 +5,6 @@ import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import DashboardLayout from "./components/DashboardLayout";
-import SignalFeed from "./pages/SignalFeed";
-import ClientRoster from "./pages/ClientRoster";
 import ActivePositions from "./pages/ActivePositions";
 import TradeLog from "./pages/TradeLog";
 import Home from "./pages/Home";
@@ -25,16 +23,6 @@ function Router() {
       <Route path="/ml">
         <DashboardLayout>
           <MLPredictions />
-        </DashboardLayout>
-      </Route>
-      <Route path="/signals">
-        <DashboardLayout>
-          <SignalFeed />
-        </DashboardLayout>
-      </Route>
-      <Route path="/clients">
-        <DashboardLayout>
-          <ClientRoster />
         </DashboardLayout>
       </Route>
       <Route path="/positions">

@@ -59,3 +59,12 @@
 - [x] Add Dashboard and ML Predictions to sidebar navigation
 - [x] Redirect post-login to /dashboard instead of /signals
 - [x] All 11 tests passing
+
+## Restructure — Remove Out-of-Scope Pages (March 17, 2026)
+- [x] Remove Client Roster page (client management belongs to client.codexyield.com)
+- [x] Remove Signal Feed page (redundant — trade_recommendations is manual, ML Predictions covers the signal view)
+- [x] Remove client API key management endpoints from routers.ts (setApiKey, testConnection, getBalances)
+- [x] Update DashboardLayout nav to: Dashboard, ML Predictions, Active Positions, Execution Log
+- [x] Update App.tsx routing to remove /signals and /clients routes
+- [x] All 11 tests passing, TypeScript clean
+- [ ] Save checkpoint and deploy to GitHub/Hostinger

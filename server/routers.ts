@@ -4,7 +4,7 @@ import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
   closePosition,
   getAllClients,
@@ -12,26 +12,20 @@ import {
   getExecutionLog,
   getLatestMlPredictions,
   getLatestRuleBasedSignals,
-  getLatestSignals,
   getOpenPositionCount,
   getOpenPositions,
   insertExecutionLog,
   insertPosition,
-  saveClientApiKey,
-  updateClientConnectionStatus,
   updateExecutionLog,
   updatePositionPnl,
-  upsertClient,
 } from "./db";
 import {
   decryptApiKey,
-  encryptApiKey,
   executeDCABuy,
   executeRotationEntry,
   executeRotationExit,
   generateClientOrderId,
   runSafetyChecks,
-  testConnection,
 } from "./sfoxEngine";
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
@@ -66,17 +60,8 @@ export const appRouter = router({
     }),
   }),
 
-  // ─── Signals (trade recommendations from tradinghq DB) ────────────────────
-  signals: router({
-    getFeed: protectedProcedure
-      .input(z.object({ limit: z.number().min(1).max(50).default(20) }).optional())
-      .query(async ({ input }) => {
-        const signals = await getLatestSignals(input?.limit ?? 20);
-        return signals;
-      }),
-  }),
-
-  // ─── Clients ───────────────────────────────────────────────────────────────
+  // ─── Clients (read-only — for trade execution dialogs) ────────────────────
+  // Client management (add/edit/API keys) lives at client.codexyield.com
   clients: router({
     getAll: protectedProcedure.query(async () => {
       const clients = await getAllClients();
@@ -92,89 +77,6 @@ export const appRouter = router({
         createdAt: c.createdAt,
       }));
     }),
-
-    add: protectedProcedure
-      .input(
-        z.object({
-          clientName: z.string().min(1).max(255),
-          clientEmail: z.string().email(),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        requireAdmin(ctx);
-        await upsertClient({
-          clientName: input.clientName,
-          clientEmail: input.clientEmail,
-          isActive: true,
-          connectionStatus: "unconfigured",
-        });
-        return { success: true };
-      }),
-
-    setApiKey: protectedProcedure
-      .input(
-        z.object({
-          clientId: z.number(),
-          apiKey: z.string().min(10),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        requireAdmin(ctx);
-        const { encrypted, iv, authTag } = encryptApiKey(input.apiKey);
-        await saveClientApiKey(input.clientId, encrypted, iv, authTag);
-        // Immediately test the connection
-        const result = await testConnection(input.apiKey);
-        await updateClientConnectionStatus(
-          input.clientId,
-          result.connected ? "connected" : "error",
-          new Date()
-        );
-        return { success: true, connected: result.connected, error: result.error };
-      }),
-
-    testConnection: protectedProcedure
-      .input(z.object({ clientId: z.number() }))
-      .mutation(async ({ ctx, input }) => {
-        requireAdmin(ctx);
-        const client = await getClientById(input.clientId);
-        if (!client?.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "No API key configured for this client" });
-        }
-        const apiKey = decryptApiKey(
-          client.sfoxApiKeyEncrypted,
-          client.sfoxApiKeyIv,
-          client.sfoxApiKeyAuthTag
-        );
-        const result = await testConnection(apiKey);
-        await updateClientConnectionStatus(
-          input.clientId,
-          result.connected ? "connected" : "error",
-          new Date()
-        );
-        return { connected: result.connected, btcBalance: result.btcBalance, error: result.error };
-      }),
-
-    getBalances: protectedProcedure
-      .input(z.object({ clientId: z.number() }))
-      .query(async ({ ctx, input }) => {
-        requireAdmin(ctx);
-        const client = await getClientById(input.clientId);
-        if (!client?.sfoxApiKeyEncrypted || !client.sfoxApiKeyIv || !client.sfoxApiKeyAuthTag) {
-          return { balances: [], error: "No API key configured" };
-        }
-        try {
-          const apiKey = decryptApiKey(
-            client.sfoxApiKeyEncrypted,
-            client.sfoxApiKeyIv,
-            client.sfoxApiKeyAuthTag
-          );
-          const { getBalances } = await import("./sfoxEngine");
-          const balances = await getBalances(apiKey);
-          return { balances, error: null };
-        } catch (err) {
-          return { balances: [], error: err instanceof Error ? err.message : String(err) };
-        }
-      }),
   }),
 
   // ─── Safety Checks ─────────────────────────────────────────────────────────
@@ -213,7 +115,6 @@ export const appRouter = router({
           openPositionCount,
           currentMarketPrice: input.currentMarketPrice,
         });
-        // Never return balances with API key info
         return {
           passed: result.passed,
           warnings: result.warnings,
@@ -251,7 +152,6 @@ export const appRouter = router({
           client.sfoxApiKeyAuthTag
         );
 
-        // Run safety checks first
         const openPositionCount = await getOpenPositionCount(input.clientId);
         const safetyResult = await runSafetyChecks({
           apiKey,
@@ -271,7 +171,6 @@ export const appRouter = router({
 
         const executionId = nanoid();
 
-        // Log pending
         await insertExecutionLog({
           executionId,
           clientId: input.clientId,
@@ -285,14 +184,12 @@ export const appRouter = router({
           executedBy: ctx.user?.id,
         });
 
-        // Execute
         const result = await executeDCABuy({
           apiKey,
           positionSizePercent: input.positionSizePercent,
           clientOrderId: generateClientOrderId("DCA", "BTCUSD"),
         });
 
-        // Update log
         await updateExecutionLog(executionId, {
           status: result.success ? "executed" : "failed",
           sfoxOrderId: result.orderId ? String(result.orderId) : undefined,
@@ -387,7 +284,6 @@ export const appRouter = router({
           executedAt: new Date(),
         });
 
-        // Open position record
         if (result.success && result.executionPrice) {
           await insertPosition({
             clientId: input.clientId,
@@ -473,7 +369,6 @@ export const appRouter = router({
           clientOrderId: generateClientOrderId("ROT_EXIT", input.pair.replace("/", "")),
         });
 
-        // Calculate P&L
         let realizedPnlPercent = 0;
         if (result.success && result.executionPrice && input.entryPrice > 0) {
           realizedPnlPercent = ((result.executionPrice - input.entryPrice) / input.entryPrice) * 100;

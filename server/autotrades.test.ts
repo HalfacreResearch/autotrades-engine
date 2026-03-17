@@ -33,6 +33,8 @@ vi.mock("./db", () => ({
   getOpenPositions: vi.fn().mockResolvedValue([]),
   getExecutionLog: vi.fn().mockResolvedValue([]),
   getLatestSignals: vi.fn().mockResolvedValue([]),
+  getLatestMlPredictions: vi.fn().mockResolvedValue([]),
+  getLatestRuleBasedSignals: vi.fn().mockResolvedValue([]),
   getActivePositionsFromTradinghq: vi.fn().mockResolvedValue([]),
   insertExecutionLog: vi.fn().mockResolvedValue({ id: 1 }),
   updateExecutionLog: vi.fn().mockResolvedValue(undefined),
@@ -152,11 +154,11 @@ describe("log.getAll", () => {
   });
 });
 
-describe("signals.getFeed", () => {
-  it("returns signal feed array", async () => {
+describe("mlPredictions.getLatest", () => {
+  it("returns an array (empty or populated)", async () => {
     const ctx = createAdminContext();
     const caller = appRouter.createCaller(ctx);
-    const result = await caller.signals.getFeed({ limit: 10 });
+    const result = await caller.mlPredictions.getLatest();
     expect(Array.isArray(result)).toBe(true);
   });
 });
