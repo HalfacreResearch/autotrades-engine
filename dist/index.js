@@ -11,6 +11,9 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
   if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
 var __commonJS = (cb, mod) => function __require2() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
@@ -45380,6 +45383,18 @@ var require_dist2 = __commonJS({
   }
 });
 
+// vite-config-stub:../../vite.config
+var vite_exports = {};
+__export(vite_exports, {
+  default: () => vite_default
+});
+var vite_default;
+var init_vite = __esm({
+  "vite-config-stub:../../vite.config"() {
+    vite_default = {};
+  }
+});
+
 // node_modules/.pnpm/dotenv@17.2.3/node_modules/dotenv/config.js
 (function() {
   require_main().config(
@@ -73650,20 +73665,16 @@ function nanoid3(size = 21) {
 
 // server/_core/vite.ts
 import path from "path";
-import { createServer as createViteServer } from "vite";
-
-// vite-config-stub:../../vite.config
-var vite_default = {};
-
-// server/_core/vite.ts
 async function setupVite(app, server) {
+  const { createServer: createViteServer } = await import("vite");
+  const { default: viteConfig } = await Promise.resolve().then(() => (init_vite(), vite_exports));
   const serverOptions = {
     middlewareMode: true,
     hmr: { server },
     allowedHosts: true
   };
   const vite = await createViteServer({
-    ...vite_default,
+    ...viteConfig,
     configFile: false,
     server: serverOptions,
     appType: "custom"
