@@ -239,7 +239,7 @@ export default function ActivePositions() {
       {/* Summary */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Open Positions", value: `${openCount} / 3 max`, highlight: openCount >= 3 ? "text-orange-500" : undefined },
+          { label: "Open Positions", value: `${openCount} / 12 max`, highlight: openCount >= 12 ? "text-orange-500" : undefined },
           { label: "Profitable", value: String(profitableCount), highlight: profitableCount > 0 ? "text-emerald-500" : undefined },
           { label: "Trailing Stop Triggered", value: String(trailingStopCount), highlight: trailingStopCount > 0 ? "text-red-500" : undefined },
           { label: "Active Pairs", value: activePairs.join(", ") || "—" },
