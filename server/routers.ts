@@ -4,7 +4,7 @@ import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { publicProcedure, publicProcedure, router } from "./_core/trpc";
 import {
   closePosition,
   getAllClients,
@@ -12,6 +12,7 @@ import {
   getExecutionLog,
   getLatestMlPredictions,
   getLatestRuleBasedSignals,
+  getLatestSignals,
   getOpenPositionCount,
   getOpenPositions,
   getPendingInitialBuyClients,
@@ -61,10 +62,10 @@ export const appRouter = router({
 
   // ─── ML Predictions (read from tradinghq DB) ──────────────────────────────
   mlPredictions: router({
-    getLatest: protectedProcedure.query(async () => {
+    getLatest: publicProcedure.query(async () => {
       return getLatestMlPredictions();
     }),
-    getRuleBasedSignals: protectedProcedure.query(async () => {
+    getRuleBasedSignals: publicProcedure.query(async () => {
       return getLatestRuleBasedSignals();
     }),
   }),
@@ -72,7 +73,7 @@ export const appRouter = router({
   // ─── Clients (read-only — for trade execution dialogs) ────────────────────
   // Client management (add/edit/API keys) lives at client.codexyield.com
   clients: router({
-    getAll: protectedProcedure.query(async () => {
+    getAll: publicProcedure.query(async () => {
       const clients = await getAllClients();
       // Never return the raw SFOX API key to the frontend
       return clients.map((c) => ({
@@ -84,12 +85,13 @@ export const appRouter = router({
         autoTradeEnabled: c.autoTradeEnabled,
         hasApiKey: !!c.sfoxApiKey,
         initialBuyExecuted: c.initialBuyExecuted,
+        isLive: c.isLive,
       }));
     }),
 
     // Returns clients who have an API key but have never had their initial 25% BTC buy executed.
     // These appear as alerts on the Dashboard prompting Matthew to execute the manual initial buy.
-    getPendingInitialBuy: protectedProcedure.query(async () => {
+    getPendingInitialBuy: publicProcedure.query(async () => {
       const clients = await getPendingInitialBuyClients();
       return clients.map((c) => ({
         userId: c.userId,
@@ -102,7 +104,7 @@ export const appRouter = router({
 
   // ─── Safety Checks ─────────────────────────────────────────────────────────
   safety: router({
-    runChecks: protectedProcedure
+    runChecks: publicProcedure
       .input(
         z.object({
           userId: z.number(),
@@ -138,7 +140,7 @@ export const appRouter = router({
 
   // ─── Trade Execution ───────────────────────────────────────────────────────
   trades: router({
-    executeDCA: protectedProcedure
+    executeDCA: publicProcedure
       .input(
         z.object({
           userId: z.number(),
@@ -201,7 +203,7 @@ export const appRouter = router({
         };
       }),
 
-    executeRotationEntry: protectedProcedure
+    executeRotationEntry: publicProcedure
       .input(
         z.object({
           userId: z.number(),
@@ -277,7 +279,7 @@ export const appRouter = router({
         };
       }),
 
-    executeRotationExit: protectedProcedure
+    executeRotationExit: publicProcedure
       .input(
         z.object({
           userId: z.number(),
@@ -345,13 +347,13 @@ export const appRouter = router({
 
   // ─── Active Positions ──────────────────────────────────────────────────────
   positions: router({
-    getAll: protectedProcedure
+    getAll: publicProcedure
       .input(z.object({ userId: z.number().optional() }).optional())
       .query(async ({ input }) => {
         return getOpenPositions(input?.userId);
       }),
 
-    refreshPrices: protectedProcedure
+    refreshPrices: publicProcedure
       .input(
         z.object({
           positionId: z.number(),
@@ -369,22 +371,16 @@ export const appRouter = router({
         const currentPeak = parseFloat(String(position.peakPrice ?? String(entryPrice)));
         const newPeak = Math.max(currentPeak, input.currentPrice);
 
-        // Auto-set trailing stop if position is net profitable and no stop is set yet
-        const trailingStopPct = parseFloat(String(position.trailingStopPct ?? "0.05"));
-        const trailingStopPrice = position.trailingStopPrice
-          ? parseFloat(String(position.trailingStopPrice))
-          : null;
-        const newTrailingStopPrice = trailingStopPrice ?? (unrealizedBtcPnl > 0 ? newPeak * (1 - trailingStopPct) : undefined);
-
+        // Stop placement is handled exclusively by the VPS exit monitor (exit_monitor.py).
+        // This endpoint only updates current price, peak price, and unrealized P&L.
         await updatePositionPrices(
           input.positionId,
           input.currentPrice,
           newPeak,
           unrealizedBtcPnl,
-          newTrailingStopPrice
         );
 
-        return { unrealizedBtcPnl, peakPrice: newPeak, trailingStopPrice: newTrailingStopPrice };
+        return { unrealizedBtcPnl, peakPrice: newPeak };
       }),
   }),
 
@@ -393,7 +389,7 @@ export const appRouter = router({
     /**
      * Get an order estimate before confirming a manual trade.
      */
-    getOrderEstimate: protectedProcedure
+    getOrderEstimate: publicProcedure
       .input(
         z.object({
           userId: z.number(),
@@ -422,7 +418,7 @@ export const appRouter = router({
      * Execute the one-time 25% initial BTC purchase for a new client.
      * MANUAL ONLY — never called by the scheduler.
      */
-    executeInitialBuy: protectedProcedure
+    executeInitialBuy: publicProcedure
       .input(z.object({ userId: z.number() }))
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
@@ -456,7 +452,7 @@ export const appRouter = router({
      * Execute a manual rotation entry across ALL active clients simultaneously.
      * Smart Routing only. Sizes: 2%, 4%, or 6% of BTC balance.
      */
-    executeManualEntry: protectedProcedure
+    executeManualEntry: publicProcedure
       .input(
         z.object({
           pair: z.string().regex(/^[A-Z]+\/BTC$/, "Must be an ALT/BTC pair"),
@@ -497,6 +493,12 @@ export const appRouter = router({
             notes: result.error ?? null,
           });
           if (result.success && result.executionPrice && result.quantity) {
+            // Determine tranche number based on existing open positions for this pair
+            const trancheNum = openPairPositions.length + 1; // 1, 2, or 3
+            // T1 entry price: use this entry's price for T1, or the first open position's entry price for T2/T3
+            const t1Price = trancheNum === 1
+              ? String(result.executionPrice)
+              : String(openPairPositions[0]?.entryPrice ?? result.executionPrice);
             await insertPosition({
               userId: client.userId,
               pair: input.pair,
@@ -505,6 +507,9 @@ export const appRouter = router({
               entryPrice: String(result.executionPrice),
               entryBtcAmount: String(result.quantity),
               status: "open",
+              trancheNumber: trancheNum,
+              t1EntryPrice: t1Price,
+              exitStage: "none",
             });
           }
           clientResults.push({ userId: client.userId, name: client.name, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
@@ -515,7 +520,7 @@ export const appRouter = router({
     /**
      * Execute a full rotation exit across ALL active clients simultaneously.
      */
-    executeManualExit: protectedProcedure
+    executeManualExit: publicProcedure
       .input(z.object({ pair: z.string() }))
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
@@ -567,7 +572,7 @@ export const appRouter = router({
     /**
      * Capital exit — sell only the original BTC risked, leave profits running.
      */
-    executeCapitalExit: protectedProcedure
+    executeCapitalExit: publicProcedure
       .input(
         z.object({
           pair: z.string(),
@@ -607,7 +612,7 @@ export const appRouter = router({
     /**
      * Emergency exit — Market order, immediate fill regardless of price.
      */
-    executeEmergencyExit: protectedProcedure
+    executeEmergencyExit: publicProcedure
       .input(z.object({ pair: z.string() }))
       .mutation(async ({ ctx, input }) => {
         requireAdmin(ctx);
@@ -648,7 +653,7 @@ export const appRouter = router({
      * Emergency liquidation — sell ALL assets → USD for a specific client.
      * Client offboarding only. Requires typed confirmation.
      */
-    executeEmergencyLiquidation: protectedProcedure
+    executeEmergencyLiquidation: publicProcedure
       .input(
         z.object({
           userId: z.number(),
@@ -674,7 +679,7 @@ export const appRouter = router({
      * Set or adjust a trailing stop on an open position.
      * Fires across ALL active clients that hold this pair.
      */
-    setTrailingStop: protectedProcedure
+    setTrailingStop: publicProcedure
       .input(
         z.object({
           pair: z.string(),
@@ -717,16 +722,25 @@ export const appRouter = router({
     /**
      * Get volatility tier recommendation for a trailing stop.
      */
-    getTrailingStopRecommendation: protectedProcedure
+    getTrailingStopRecommendation: publicProcedure
       .input(z.object({ dailyPrices: z.array(z.number()).min(2) }))
       .query(({ input }) => {
         return calculateVolatilityTier(input.dailyPrices);
       }),
   }),
 
+  // ─── Arbiter Signals (read from tradinghq DB) ────────────────────────────
+  signals: router({
+    getLatest: publicProcedure
+      .input(z.object({ limit: z.number().min(1).max(50).default(20) }).optional())
+      .query(async ({ input }) => {
+        return getLatestSignals(input?.limit ?? 20);
+      }),
+  }),
+
   // ─── Execution Log ─────────────────────────────────────────────────────────
   log: router({
-    getAll: protectedProcedure
+    getAll: publicProcedure
       .input(
         z.object({
           limit: z.number().min(1).max(500).default(100),

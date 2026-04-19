@@ -119,7 +119,9 @@ export interface ClientWithCredentials {
   credentialId: number;
   name: string | null;
   email: string | null;
+  role: string | null;
   sfoxApiKey: string;
+  isLive: boolean;
   initialBuyExecuted: boolean;
   isActive: boolean | null;
   autoTradeEnabled: boolean | null;
@@ -131,19 +133,21 @@ export async function getAllClients(): Promise<ClientWithCredentials[]> {
   if (!db) return [];
   try {
     const result = await db.execute(
-      `SELECT u.id as userId, cc.id as credentialId, u.name, u.email,
-       cc.sfoxApiKey, cc.initial_buy_executed as initialBuyExecuted,
+      `SELECT u.id as userId, cc.id as credentialId, u.name, u.email, u.role,
+       cc.sfoxApiKey, cc.is_live as isLive, cc.initial_buy_executed as initialBuyExecuted,
        cn.is_active as isActive, cn.auto_trade_enabled as autoTradeEnabled,
        cn.max_btc_per_trade as maxBtcPerTrade
        FROM client_credentials cc
        JOIN users u ON cc.userId = u.id
        LEFT JOIN client_connections cn ON cn.credential_id = cc.id
-       WHERE u.role = 'user'
+       WHERE u.role IN ('user', 'client')
+       AND u.role != 'inactive'
        ORDER BY u.name`
     );
     const rows = (result as unknown[])[0] as ClientWithCredentials[];
     return rows.map(r => ({
       ...r,
+      isLive: r.isLive == (1 as unknown) || r.isLive === true,
       initialBuyExecuted: r.initialBuyExecuted == (1 as unknown) || r.initialBuyExecuted === true,
       isActive: r.isActive == (1 as unknown) || r.isActive === true,
       autoTradeEnabled: r.autoTradeEnabled == (1 as unknown) || r.autoTradeEnabled === true,
@@ -208,8 +212,9 @@ export async function updatePositionPrices(
   currentPrice: number,
   peakPrice: number,
   unrealizedBtcPnl: number,
-  trailingStopPrice?: number
 ): Promise<void> {
+  // Stop placement is handled exclusively by the VPS exit monitor (exit_monitor.py).
+  // This function only updates price tracking fields.
   const db = await getClientPortalDb();
   if (!db) return;
   await db
@@ -218,7 +223,6 @@ export async function updatePositionPrices(
       currentPrice: String(currentPrice),
       peakPrice: String(peakPrice),
       unrealizedBtcPnl: String(unrealizedBtcPnl),
-      ...(trailingStopPrice !== undefined ? { trailingStopPrice: String(trailingStopPrice) } : {}),
     })
     .where(eq(activePositions.id, id));
 }
@@ -392,7 +396,7 @@ export async function getLatestSignals(limit = 20): Promise<TradinghqSignal[]> {
   if (!db) return [];
   try {
     const result = await db.execute(
-      `SELECT recommendation_id as recommendationId, type, pair, signal, confidence, score, action,
+      `SELECT recommendation_id as recommendationId, type, pair, signal_type as signal, confidence, score, action,
        position_size as positionSize, risk_level as riskLevel, factors, model_info as modelInfo,
        status, price_at_generation as priceAtGeneration, createdAt, expiresAt
        FROM trade_recommendations

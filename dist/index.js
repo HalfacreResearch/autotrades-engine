@@ -54418,7 +54418,7 @@ var users = mysqlTable("users", {
   name: text("name"),
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
-  role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+  role: mysqlEnum("role", ["user", "admin", "client", "inactive"]).default("user").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull()
@@ -54433,6 +54433,7 @@ var clientCredentials = mysqlTable("client_credentials", {
    * Set to FALSE only for brand-new clients who need their first trade.
    * The 25% initial buy is ALWAYS manual — never automated.
    */
+  isLive: boolean("is_live").default(false).notNull(),
   initialBuyExecuted: boolean("initial_buy_executed").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull()
@@ -54492,7 +54493,18 @@ var activePositions = mysqlTable(
     status: mysqlEnum("status", ["open", "closed", "stopped_out"]).notNull().default("open"),
     openedAt: timestamp("opened_at").defaultNow().notNull(),
     closedAt: timestamp("closed_at"),
-    closeExecutionId: int("close_execution_id")
+    closeExecutionId: int("close_execution_id"),
+    /**
+     * Tranche tracking -- required for the documented per-tranche exit system.
+     * trancheNumber: 1 = initial entry (2%), 2 = DCA-down at -2.5% (4%), 3 = DCA-down at -5.0% (6%)
+     * t1EntryPrice: T1 entry price stored on ALL tranches as the reference for DCA-down triggers.
+     * stopOrderId: SFOX order ID of the active stop order placed for this tranche.
+     * exitStage: tracks which stop has been placed by the VPS exit monitor.
+     */
+    trancheNumber: int("tranche_number").notNull().default(1),
+    t1EntryPrice: decimal("t1_entry_price", { precision: 20, scale: 8 }),
+    stopOrderId: varchar("stop_order_id", { length: 100 }),
+    exitStage: mysqlEnum("exit_stage", ["none", "hard_stop_placed", "trailing_stop_placed"]).notNull().default("none")
   },
   (table) => ({
     userIdx: index("idx_pos_user").on(table.userId),
@@ -54582,19 +54594,21 @@ async function getAllClients() {
   if (!db) return [];
   try {
     const result = await db.execute(
-      `SELECT u.id as userId, cc.id as credentialId, u.name, u.email,
-       cc.sfoxApiKey, cc.initial_buy_executed as initialBuyExecuted,
+      `SELECT u.id as userId, cc.id as credentialId, u.name, u.email, u.role,
+       cc.sfoxApiKey, cc.is_live as isLive, cc.initial_buy_executed as initialBuyExecuted,
        cn.is_active as isActive, cn.auto_trade_enabled as autoTradeEnabled,
        cn.max_btc_per_trade as maxBtcPerTrade
        FROM client_credentials cc
        JOIN users u ON cc.userId = u.id
        LEFT JOIN client_connections cn ON cn.credential_id = cc.id
-       WHERE u.role = 'user'
+       WHERE u.role IN ('user', 'client')
+       AND u.role != 'inactive'
        ORDER BY u.name`
     );
     const rows = result[0];
     return rows.map((r) => ({
       ...r,
+      isLive: r.isLive == 1 || r.isLive === true,
       initialBuyExecuted: r.initialBuyExecuted == 1 || r.initialBuyExecuted === true,
       isActive: r.isActive == 1 || r.isActive === true,
       autoTradeEnabled: r.autoTradeEnabled == 1 || r.autoTradeEnabled === true
@@ -54633,14 +54647,13 @@ async function insertPosition(data) {
   if (!db) return;
   await db.insert(activePositions).values(data);
 }
-async function updatePositionPrices(id, currentPrice, peakPrice, unrealizedBtcPnl, trailingStopPrice) {
+async function updatePositionPrices(id, currentPrice, peakPrice, unrealizedBtcPnl) {
   const db = await getClientPortalDb();
   if (!db) return;
   await db.update(activePositions).set({
     currentPrice: String(currentPrice),
     peakPrice: String(peakPrice),
-    unrealizedBtcPnl: String(unrealizedBtcPnl),
-    ...trailingStopPrice !== void 0 ? { trailingStopPrice: String(trailingStopPrice) } : {}
+    unrealizedBtcPnl: String(unrealizedBtcPnl)
   }).where(eq(activePositions.id, id));
 }
 async function setTrailingStop(id, trailingStopPct, trailingStopPrice) {
@@ -54729,6 +54742,25 @@ async function getLatestRuleBasedSignals() {
     }));
   } catch (e) {
     console.warn("[TradinghqDB] getLatestRuleBasedSignals error:", e);
+    return [];
+  }
+}
+async function getLatestSignals(limit = 20) {
+  const db = await getTradinghqDb();
+  if (!db) return [];
+  try {
+    const result = await db.execute(
+      `SELECT recommendation_id as recommendationId, type, pair, signal_type as signal, confidence, score, action,
+       position_size as positionSize, risk_level as riskLevel, factors, model_info as modelInfo,
+       status, price_at_generation as priceAtGeneration, createdAt, expiresAt
+       FROM trade_recommendations
+       WHERE status IN ('pending', 'approved')
+       AND expiresAt > NOW()
+       ORDER BY createdAt DESC
+       LIMIT ${limit}`
+    );
+    return result[0];
+  } catch {
     return [];
   }
 }
@@ -72963,17 +72995,17 @@ var appRouter = router({
   }),
   // ─── ML Predictions (read from tradinghq DB) ──────────────────────────────
   mlPredictions: router({
-    getLatest: protectedProcedure.query(async () => {
+    getLatest: publicProcedure.query(async () => {
       return getLatestMlPredictions();
     }),
-    getRuleBasedSignals: protectedProcedure.query(async () => {
+    getRuleBasedSignals: publicProcedure.query(async () => {
       return getLatestRuleBasedSignals();
     })
   }),
   // ─── Clients (read-only — for trade execution dialogs) ────────────────────
   // Client management (add/edit/API keys) lives at client.codexyield.com
   clients: router({
-    getAll: protectedProcedure.query(async () => {
+    getAll: publicProcedure.query(async () => {
       const clients = await getAllClients();
       return clients.map((c) => ({
         userId: c.userId,
@@ -72983,12 +73015,13 @@ var appRouter = router({
         isActive: c.isActive,
         autoTradeEnabled: c.autoTradeEnabled,
         hasApiKey: !!c.sfoxApiKey,
-        initialBuyExecuted: c.initialBuyExecuted
+        initialBuyExecuted: c.initialBuyExecuted,
+        isLive: c.isLive
       }));
     }),
     // Returns clients who have an API key but have never had their initial 25% BTC buy executed.
     // These appear as alerts on the Dashboard prompting Matthew to execute the manual initial buy.
-    getPendingInitialBuy: protectedProcedure.query(async () => {
+    getPendingInitialBuy: publicProcedure.query(async () => {
       const clients = await getPendingInitialBuyClients();
       return clients.map((c) => ({
         userId: c.userId,
@@ -73000,7 +73033,7 @@ var appRouter = router({
   }),
   // ─── Safety Checks ─────────────────────────────────────────────────────────
   safety: router({
-    runChecks: protectedProcedure.input(
+    runChecks: publicProcedure.input(
       external_exports.object({
         userId: external_exports.number(),
         tradeType: external_exports.enum(["DCA_BUY", "ROTATION_ENTRY", "ROTATION_EXIT"]),
@@ -73033,7 +73066,7 @@ var appRouter = router({
   }),
   // ─── Trade Execution ───────────────────────────────────────────────────────
   trades: router({
-    executeDCA: protectedProcedure.input(
+    executeDCA: publicProcedure.input(
       external_exports.object({
         userId: external_exports.number(),
         positionSizePercent: external_exports.number().min(1).max(10),
@@ -73087,7 +73120,7 @@ var appRouter = router({
         warnings: safetyResult.warnings
       };
     }),
-    executeRotationEntry: protectedProcedure.input(
+    executeRotationEntry: publicProcedure.input(
       external_exports.object({
         userId: external_exports.number(),
         pair: external_exports.string().regex(/^[A-Z]+\/BTC$/, "Must be an ALT/BTC pair"),
@@ -73153,7 +73186,7 @@ var appRouter = router({
         warnings: safetyResult.warnings
       };
     }),
-    executeRotationExit: protectedProcedure.input(
+    executeRotationExit: publicProcedure.input(
       external_exports.object({
         userId: external_exports.number(),
         positionId: external_exports.number(),
@@ -73211,10 +73244,10 @@ var appRouter = router({
   }),
   // ─── Active Positions ──────────────────────────────────────────────────────
   positions: router({
-    getAll: protectedProcedure.input(external_exports.object({ userId: external_exports.number().optional() }).optional()).query(async ({ input }) => {
+    getAll: publicProcedure.input(external_exports.object({ userId: external_exports.number().optional() }).optional()).query(async ({ input }) => {
       return getOpenPositions(input?.userId);
     }),
-    refreshPrices: protectedProcedure.input(
+    refreshPrices: publicProcedure.input(
       external_exports.object({
         positionId: external_exports.number(),
         currentPrice: external_exports.number()
@@ -73228,17 +73261,13 @@ var appRouter = router({
       const unrealizedBtcPnl = entryBtcAmount * ((input.currentPrice - entryPrice) / entryPrice);
       const currentPeak = parseFloat(String(position.peakPrice ?? String(entryPrice)));
       const newPeak = Math.max(currentPeak, input.currentPrice);
-      const trailingStopPct = parseFloat(String(position.trailingStopPct ?? "0.05"));
-      const trailingStopPrice = position.trailingStopPrice ? parseFloat(String(position.trailingStopPrice)) : null;
-      const newTrailingStopPrice = trailingStopPrice ?? (unrealizedBtcPnl > 0 ? newPeak * (1 - trailingStopPct) : void 0);
       await updatePositionPrices(
         input.positionId,
         input.currentPrice,
         newPeak,
-        unrealizedBtcPnl,
-        newTrailingStopPrice
+        unrealizedBtcPnl
       );
-      return { unrealizedBtcPnl, peakPrice: newPeak, trailingStopPrice: newTrailingStopPrice };
+      return { unrealizedBtcPnl, peakPrice: newPeak };
     })
   }),
   // ─── Manual Trading Endpoints ────────────────────────────────────────────
@@ -73246,7 +73275,7 @@ var appRouter = router({
     /**
      * Get an order estimate before confirming a manual trade.
      */
-    getOrderEstimate: protectedProcedure.input(
+    getOrderEstimate: publicProcedure.input(
       external_exports.object({
         userId: external_exports.number(),
         side: external_exports.enum(["buy", "sell"]),
@@ -73272,7 +73301,7 @@ var appRouter = router({
      * Execute the one-time 25% initial BTC purchase for a new client.
      * MANUAL ONLY — never called by the scheduler.
      */
-    executeInitialBuy: protectedProcedure.input(external_exports.object({ userId: external_exports.number() })).mutation(async ({ ctx, input }) => {
+    executeInitialBuy: publicProcedure.input(external_exports.object({ userId: external_exports.number() })).mutation(async ({ ctx, input }) => {
       requireAdmin(ctx);
       const client = await getClientByUserId(input.userId);
       if (!client?.sfoxApiKey) {
@@ -73303,7 +73332,7 @@ var appRouter = router({
      * Execute a manual rotation entry across ALL active clients simultaneously.
      * Smart Routing only. Sizes: 2%, 4%, or 6% of BTC balance.
      */
-    executeManualEntry: protectedProcedure.input(
+    executeManualEntry: publicProcedure.input(
       external_exports.object({
         pair: external_exports.string().regex(/^[A-Z]+\/BTC$/, "Must be an ALT/BTC pair"),
         positionSizePercent: external_exports.enum(["2", "4", "6"]).transform(Number)
@@ -73339,6 +73368,8 @@ var appRouter = router({
           notes: result.error ?? null
         });
         if (result.success && result.executionPrice && result.quantity) {
+          const trancheNum = openPairPositions.length + 1;
+          const t1Price = trancheNum === 1 ? String(result.executionPrice) : String(openPairPositions[0]?.entryPrice ?? result.executionPrice);
           await insertPosition({
             userId: client.userId,
             pair: input.pair,
@@ -73346,7 +73377,10 @@ var appRouter = router({
             entryExecutionId: logId,
             entryPrice: String(result.executionPrice),
             entryBtcAmount: String(result.quantity),
-            status: "open"
+            status: "open",
+            trancheNumber: trancheNum,
+            t1EntryPrice: t1Price,
+            exitStage: "none"
           });
         }
         clientResults.push({ userId: client.userId, name: client.name, success: result.success, orderId: result.orderId, executionPrice: result.executionPrice, error: result.error });
@@ -73356,7 +73390,7 @@ var appRouter = router({
     /**
      * Execute a full rotation exit across ALL active clients simultaneously.
      */
-    executeManualExit: protectedProcedure.input(external_exports.object({ pair: external_exports.string() })).mutation(async ({ ctx, input }) => {
+    executeManualExit: publicProcedure.input(external_exports.object({ pair: external_exports.string() })).mutation(async ({ ctx, input }) => {
       requireAdmin(ctx);
       const allClients = await getAllClients();
       const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
@@ -73405,7 +73439,7 @@ var appRouter = router({
     /**
      * Capital exit — sell only the original BTC risked, leave profits running.
      */
-    executeCapitalExit: protectedProcedure.input(
+    executeCapitalExit: publicProcedure.input(
       external_exports.object({
         pair: external_exports.string(),
         entryBtcCost: external_exports.number().positive(),
@@ -73442,7 +73476,7 @@ var appRouter = router({
     /**
      * Emergency exit — Market order, immediate fill regardless of price.
      */
-    executeEmergencyExit: protectedProcedure.input(external_exports.object({ pair: external_exports.string() })).mutation(async ({ ctx, input }) => {
+    executeEmergencyExit: publicProcedure.input(external_exports.object({ pair: external_exports.string() })).mutation(async ({ ctx, input }) => {
       requireAdmin(ctx);
       const allClients = await getAllClients();
       const clients = allClients.filter((c) => c.isActive && c.sfoxApiKey);
@@ -73480,7 +73514,7 @@ var appRouter = router({
      * Emergency liquidation — sell ALL assets → USD for a specific client.
      * Client offboarding only. Requires typed confirmation.
      */
-    executeEmergencyLiquidation: protectedProcedure.input(
+    executeEmergencyLiquidation: publicProcedure.input(
       external_exports.object({
         userId: external_exports.number(),
         confirmationString: external_exports.string()
@@ -73503,7 +73537,7 @@ var appRouter = router({
      * Set or adjust a trailing stop on an open position.
      * Fires across ALL active clients that hold this pair.
      */
-    setTrailingStop: protectedProcedure.input(
+    setTrailingStop: publicProcedure.input(
       external_exports.object({
         pair: external_exports.string(),
         stopPercent: external_exports.number().min(0.01).max(0.5)
@@ -73542,13 +73576,19 @@ var appRouter = router({
     /**
      * Get volatility tier recommendation for a trailing stop.
      */
-    getTrailingStopRecommendation: protectedProcedure.input(external_exports.object({ dailyPrices: external_exports.array(external_exports.number()).min(2) })).query(({ input }) => {
+    getTrailingStopRecommendation: publicProcedure.input(external_exports.object({ dailyPrices: external_exports.array(external_exports.number()).min(2) })).query(({ input }) => {
       return calculateVolatilityTier(input.dailyPrices);
+    })
+  }),
+  // ─── Arbiter Signals (read from tradinghq DB) ────────────────────────────
+  signals: router({
+    getLatest: publicProcedure.input(external_exports.object({ limit: external_exports.number().min(1).max(50).default(20) }).optional()).query(async ({ input }) => {
+      return getLatestSignals(input?.limit ?? 20);
     })
   }),
   // ─── Execution Log ─────────────────────────────────────────────────────────
   log: router({
-    getAll: protectedProcedure.input(
+    getAll: publicProcedure.input(
       external_exports.object({
         limit: external_exports.number().min(1).max(500).default(100),
         userId: external_exports.number().optional()

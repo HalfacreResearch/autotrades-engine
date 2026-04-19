@@ -29,7 +29,7 @@ export const users = mysqlTable("users", {
   name: text("name"),
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
-  role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+  role: mysqlEnum("role", ["user", "admin", "client", "inactive"]).default("user").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -52,6 +52,7 @@ export const clientCredentials = mysqlTable("client_credentials", {
    * Set to FALSE only for brand-new clients who need their first trade.
    * The 25% initial buy is ALWAYS manual — never automated.
    */
+  isLive: boolean("is_live").default(false).notNull(),
   initialBuyExecuted: boolean("initial_buy_executed").default(true).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -136,6 +137,17 @@ export const activePositions = mysqlTable(
     openedAt: timestamp("opened_at").defaultNow().notNull(),
     closedAt: timestamp("closed_at"),
     closeExecutionId: int("close_execution_id"),
+    /**
+     * Tranche tracking -- required for the documented per-tranche exit system.
+     * trancheNumber: 1 = initial entry (2%), 2 = DCA-down at -2.5% (4%), 3 = DCA-down at -5.0% (6%)
+     * t1EntryPrice: T1 entry price stored on ALL tranches as the reference for DCA-down triggers.
+     * stopOrderId: SFOX order ID of the active stop order placed for this tranche.
+     * exitStage: tracks which stop has been placed by the VPS exit monitor.
+     */
+    trancheNumber: int("tranche_number").notNull().default(1),
+    t1EntryPrice: decimal("t1_entry_price", { precision: 20, scale: 8 }),
+    stopOrderId: varchar("stop_order_id", { length: 100 }),
+    exitStage: mysqlEnum("exit_stage", ["none", "hard_stop_placed", "trailing_stop_placed"]).notNull().default("none"),
   },
   (table) => ({
     userIdx: index("idx_pos_user").on(table.userId),
