@@ -1,36 +1,27 @@
-name: Build and Deploy AutoTrades
+name: Build and Deploy Autotrades Engine
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   build-and-deploy:
-    name: Build on GitHub, Deploy to Hostinger
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout source code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 22
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
-
-      - name: Enable corepack and install pnpm 10.4.1
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.4.1 --activate
+          node-version: '20'
+          cache: 'npm'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci
 
-      - name: Build frontend (Vite) and server (esbuild)
-        run: pnpm build
-        env:
-          NODE_ENV: production
+      - name: Build frontend and server
+        run: npm run build
 
       - name: Copy compiled dist/ to Hostinger via SCP
         uses: appleboy/scp-action@v0.1.7
@@ -43,7 +34,7 @@ jobs:
           target: "/home/u263512999/domains/autotrades.codexyield.com/nodejs/"
           overwrite: true
 
-      - name: Restart lsnode process on Hostinger
+      - name: Restart Node.js process on Hostinger
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.HOSTINGER_HOST }}
@@ -52,4 +43,4 @@ jobs:
           key: ${{ secrets.HOSTINGER_SSH_PRIVATE_KEY }}
           script: |
             touch /home/u263512999/domains/autotrades.codexyield.com/nodejs/tmp/restart.txt
-            echo "AutoTrades restarted at $(date)"
+            echo "Autotrades Engine restarted at $(date)"
