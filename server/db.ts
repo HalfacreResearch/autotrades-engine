@@ -1,11 +1,13 @@
 /**
  * Database helpers for autotrades-engine.
  *
- * ALL operations use the VPS MySQL databases:
- *   - CLIENT_PORTAL_DATABASE_URL → codex_portal (users, credentials, positions, log)
- *   - TRADINGHQ_DATABASE_URL     → tradinghq (ml_predictions, factor_snapshots, trade_recommendations)
+ * Two VPS MySQL databases:
+ *   - CLIENT_PORTAL_DATABASE_URL -> codex_portal  (operations: users, credentials, positions, execution log)
+ *   - TRADINGHQ_DATABASE_URL     -> tradinghq      (research: factors, ML models, backtests, signals, candlesticks)
  *
- * There is NO Manus-hosted database. DATABASE_URL is NOT used.
+ * codex_portal is the write target for all trade execution state.
+ * tradinghq is read-only from this service -- signals and ML predictions flow in, never out.
+ * DATABASE_URL is not used by this service.
  */
 
 import { and, desc, eq } from "drizzle-orm";
@@ -27,12 +29,12 @@ import {
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
-// ─── codex_portal DB (CLIENT_PORTAL_DATABASE_URL) ────────────────────────────
+// --- codex_portal DB (operations: users, credentials, positions, execution log) ---
 
 let _clientPortalDb: ReturnType<typeof drizzle> | null = null;
 
 export async function getClientPortalDb() {
-  const url = process.env.CLIENT_PORTAL_DATABASE_URL;
+  const url = ENV.clientPortalDatabaseUrl || undefined;
   if (!url) return null;
   if (!_clientPortalDb) {
     try {
@@ -45,15 +47,15 @@ export async function getClientPortalDb() {
   return _clientPortalDb;
 }
 
-// Alias — used by auth core which calls getDb()
+// Alias -- used by auth core which calls getDb()
 export const getDb = getClientPortalDb;
 
-// ─── tradinghq DB (TRADINGHQ_DATABASE_URL) ───────────────────────────────────
+// --- tradinghq DB (research: factors, ML models, backtests, signals) ---
 
 let _tradinghqDb: ReturnType<typeof drizzle> | null = null;
 
 export async function getTradinghqDb() {
-  const url = process.env.TRADINGHQ_DATABASE_URL;
+  const url = ENV.tradinghqDatabaseUrl || undefined;
   if (!url) return null;
   if (!_tradinghqDb) {
     try {
@@ -66,7 +68,7 @@ export async function getTradinghqDb() {
   return _tradinghqDb;
 }
 
-// ─── User helpers (codex_portal.users) ───────────────────────────────────────
+// --- User helpers (codex_portal.users) ---
 
 export async function upsertUser(user: InsertUser): Promise<void> {
   if (!user.openId) throw new Error("User openId is required for upsert");
@@ -108,11 +110,11 @@ export async function getUserByOpenId(openId: string): Promise<User | undefined>
   return result[0];
 }
 
-// ─── Client helpers (codex_portal.client_credentials + client_connections) ───
+// --- Client helpers (codex_portal.client_credentials + client_connections) ---
 
 /**
  * Returns all active clients with their SFOX API keys and trading settings.
- * Joins client_credentials → client_connections → users.
+ * Joins client_credentials -> client_connections -> users.
  */
 export interface ClientWithCredentials {
   userId: number;
@@ -182,7 +184,7 @@ export async function markInitialBuyExecuted(credentialId: number): Promise<void
     .where(eq(clientCredentials.id, credentialId));
 }
 
-// ─── Active Position helpers (codex_portal.autotrades_active_positions) ───────
+// --- Active Position helpers (codex_portal.autotrades_active_positions) ---
 
 export async function getOpenPositions(userId?: number): Promise<ActivePosition[]> {
   const db = await getClientPortalDb();
@@ -259,7 +261,7 @@ export async function closePosition(
     .where(eq(activePositions.id, id));
 }
 
-// ─── Execution Log helpers (codex_portal.execution_log) ──────────────────────
+// --- Execution Log helpers (codex_portal.execution_log) ---
 
 export async function insertExecutionLog(data: InsertExecutionLog): Promise<number> {
   const db = await getClientPortalDb();
@@ -281,7 +283,7 @@ export async function getExecutionLog(limit = 100, userId?: number): Promise<Exe
     .limit(limit);
 }
 
-// ─── TradinghqDB helpers (read-only) ─────────────────────────────────────────
+// --- tradinghq helpers (read-only) ---
 
 export interface MlPrediction {
   id: number;
