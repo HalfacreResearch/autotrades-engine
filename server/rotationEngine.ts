@@ -18,7 +18,7 @@
  *   - At +3.6% above tranche entry: VPS places SFOX hard stop at +2.6% above entry (alg 304)
  *   - At +6.6% above tranche entry: VPS replaces hard stop with 3% trailing stop (alg 308)
  *   - Exit order is bottom-up: T3 exits first, T2 second, T1 last
- *   - All sells are manual. The VPS places stop orders. Matthew executes.
+ *   - Exits are fully automated. The VPS exit_monitor.py places SFOX stop orders automatically.
  *
  * Live vs. Mock (Rule 6 -- non-negotiable):
  *   - Every execution function checks client.isLive before calling SFOX API.
@@ -220,7 +220,7 @@ export function calculateTotalRotationExposure(
  *
  * @param signal The rotation signal from the Arbiter / ML predictions
  * @param currentPrice Current market price of the altcoin in BTC (fetched by caller or auto-fetched)
- * @param forceSizePercent Override the auto-determined size (for manual trades only)
+ * @param forceSizePercent Override the auto-determined size (for emergency system overrides only)
  * @param dryRun Log intent but do not place orders
  */
 export async function runRotationEntry(
