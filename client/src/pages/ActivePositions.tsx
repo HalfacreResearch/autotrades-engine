@@ -43,18 +43,18 @@ function ExitDialog({ position, onClose, onSuccess }: ExitDialogProps) {
   const [capitalBtcCost, setCapitalBtcCost] = useState("");
   const [capitalCurrentPrice, setCapitalCurrentPrice] = useState("");
 
-  const manualExit = trpc.trading.executeManualExit.useMutation();
+  const systemExit = trpc.trading.executeManualExit.useMutation();
   const capitalExit = trpc.trading.executeCapitalExit.useMutation();
   const emergencyExit = trpc.trading.executeEmergencyExit.useMutation();
 
-  const isLoading = manualExit.isPending || capitalExit.isPending || emergencyExit.isPending;
+  const isLoading = systemExit.isPending || capitalExit.isPending || emergencyExit.isPending;
   const pnl = parseFloat(String(position.unrealizedBtcPnl ?? "0"));
   const entryPrice = parseFloat(String(position.entryPrice));
 
   async function handleExit() {
     try {
       if (exitType === "full") {
-        const r = await manualExit.mutateAsync({ pair: position.pair });
+        const r = await systemExit.mutateAsync({ pair: position.pair });
         const ok = r.clientResults.filter((c) => c.success).length;
         toast.success(`Full exit executed — ${ok} client${ok !== 1 ? "s" : ""} closed`);
       } else if (exitType === "capital") {
@@ -261,7 +261,7 @@ export default function ActivePositions() {
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">
             <Activity className="w-8 h-8 mx-auto mb-3 opacity-40" />
-            <p>No open positions. Execute a rotation entry from Manual Trading.</p>
+            <p>No open positions. The system will execute rotation entries automatically when signals fire.</p>
           </CardContent>
         </Card>
       ) : (
